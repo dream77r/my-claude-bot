@@ -325,6 +325,59 @@ async def run_bot(bridge: TelegramBridge) -> None:
         await app.shutdown()
 
 
+def _ensure_qmd(root: Path) -> None:
+    """Проверить наличие qmd, установить если нет."""
+    import shutil
+    import subprocess
+
+    qmd_path = Path.home() / ".local" / "bin" / "qmd"
+
+    if qmd_path.exists():
+        logger.info(f"qmd найден: {qmd_path}")
+        # Инициализировать коллекции для всех агентов если ещё нет
+        for agent_yaml in sorted((root / "agents").glob("*/agent.yaml")):
+            mem_dir = agent_yaml.parent / "memory"
+            if mem_dir.exists():
+                result = subprocess.run(
+                    [str(qmd_path), "collection", "list"],
+                    capture_output=True, text=True,
+                )
+                col_name = f"{agent_yaml.parent.name}-wiki"
+                if col_name not in result.stdout:
+                    logger.info(f"Создаю qmd-коллекцию '{col_name}'")
+                    subprocess.run(
+                        [str(qmd_path), "collection", "add", str(mem_dir), "--name", col_name],
+                        capture_output=True, text=True,
+                    )
+        return
+
+    # qmd не установлен — попробовать установить
+    if not shutil.which("npm"):
+        logger.warning("qmd не установлен, npm не найден — семантический поиск недоступен")
+        return
+
+    logger.info("Устанавливаю qmd (семантический поиск по wiki)...")
+    result = subprocess.run(
+        ["npm", "install", "-g", "@tobilu/qmd", "--prefix", str(Path.home() / ".local")],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    if result.returncode == 0 and qmd_path.exists():
+        logger.info("qmd установлен успешно")
+        # Создать коллекции
+        for agent_yaml in sorted((root / "agents").glob("*/agent.yaml")):
+            mem_dir = agent_yaml.parent / "memory"
+            if mem_dir.exists():
+                col_name = f"{agent_yaml.parent.name}-wiki"
+                subprocess.run(
+                    [str(qmd_path), "collection", "add", str(mem_dir), "--name", col_name],
+                    capture_output=True, text=True,
+                )
+                logger.info(f"qmd-коллекция '{col_name}' создана")
+    else:
+        logger.warning(f"qmd не удалось установить: {result.stderr[:200]}")
+
+
 async def async_main() -> None:
     """Главная async функция."""
     root = find_project_root()
@@ -341,6 +394,9 @@ async def async_main() -> None:
             "Скопируй .env.example → .env и заполни токены."
         )
 
+    # Проверить и установить qmd (семантический поиск по wiki)
+    _ensure_qmd(root)
+
     # Загрузить агентов
     agents = load_agents(root)
     if not agents:
@@ -354,6 +410,24 @@ async def async_main() -> None:
     for agent in agents:
         if memory.git_init(agent.agent_dir):
             logger.info(f"Git memory initialized for '{agent.name}'")
+
+    # Проверить прерванные checkpoint'ы
+    from .checkpoint import recover as checkpoint_recover, format_recovery_message, clear as checkpoint_clear
+    for agent in agents:
+        cp = checkpoint_recover(agent.agent_dir)
+        if cp:
+            logger.warning(
+                f"Agent '{agent.name}': прерванный вызов обнаружен. "
+                f"Prompt: {cp.get('prompt', '')[:50]}..."
+            )
+            # Записать в daily note
+            memory.log_message(
+                agent.agent_dir, "system",
+                format_recovery_message(cp)
+            )
+            # Сбросить session (прерванная сессия невалидна)
+            memory.clear_session_id(agent.agent_dir)
+            checkpoint_clear(agent.agent_dir)
 
     # ── MessageBus ──
     bus = FleetBus()

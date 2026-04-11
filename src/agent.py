@@ -29,10 +29,15 @@ from claude_agent_sdk import (
 
 from . import memory
 from . import get_claude_cli_path
+from .audit import make_audit_hook
+from .checkpoint import make_checkpoint_hooks
 from .command_guard import make_guard_hook
 from .consolidator import Consolidator
 from .hooks import HookContext, HookRegistry
 from .i18n import t
+from .input_sanitizer import make_sanitizer_hook
+from .metrics import make_metrics_hook
+from .ssrf_protection import make_ssrf_hook
 from .tool_hints import format_tool_hint
 
 logger = logging.getLogger(__name__)
@@ -72,12 +77,59 @@ class Agent:
         # Hook-система (lifecycle hooks)
         self.hooks = HookRegistry()
 
+        # Input Sanitizer — before_call хук (защита от prompt injection)
+        sanitizer_enabled = self.config.get("input_sanitizer", {}).get("enabled", True)
+        if sanitizer_enabled:
+            self.hooks.register_fn(
+                "before_call", "input_sanitizer", make_sanitizer_hook()
+            )
+
         # Command Guard — on_tool_use хук (логирование опасных команд)
         guard_enabled = self.config.get("command_guard", {}).get("enabled", True)
         if guard_enabled:
             self.hooks.register_fn(
                 "on_tool_use", "command_guard", make_guard_hook()
             )
+
+        # SSRF Protection — on_tool_use хук (блокировка fetch к внутренним IP)
+        ssrf_config = self.config.get("ssrf_protection", {})
+        ssrf_enabled = ssrf_config.get("enabled", True)
+        if ssrf_enabled:
+            ssrf_whitelist = ssrf_config.get("whitelist", [])
+            self.hooks.register_fn(
+                "on_tool_use", "ssrf_protection",
+                make_ssrf_hook(ssrf_whitelist or None)
+            )
+
+        # Audit Logging — JSONL аудит-лог всех tool calls
+        audit_enabled = self.config.get("audit", {}).get("enabled", True)
+        if audit_enabled:
+            self.hooks.register_fn(
+                "on_tool_use", "audit",
+                make_audit_hook(self.config_path.parent.as_posix())
+            )
+
+        # Checkpoint Recovery — сохранение состояния при крэше
+        checkpoint_enabled = self.config.get("checkpoint", {}).get("enabled", True)
+        if checkpoint_enabled:
+            cp_before, cp_tool, cp_after, cp_error = make_checkpoint_hooks(
+                self.config_path.parent.as_posix()
+            )
+            self.hooks.register_fn("before_call", "checkpoint_before", cp_before)
+            self.hooks.register_fn("on_tool_use", "checkpoint_tool", cp_tool)
+            self.hooks.register_fn("after_call", "checkpoint_after", cp_after)
+            self.hooks.register_fn("on_error", "checkpoint_error", cp_error)
+
+        # Metrics — автоматическое логирование использования
+        metrics_enabled = self.config.get("metrics", {}).get("enabled", True)
+        if metrics_enabled:
+            before_fn, tool_fn, after_fn, error_fn = make_metrics_hook(
+                self.config_path.parent.as_posix(), self.claude_model
+            )
+            self.hooks.register_fn("before_call", "metrics_before", before_fn)
+            self.hooks.register_fn("on_tool_use", "metrics_tool", tool_fn)
+            self.hooks.register_fn("after_call", "metrics_after", after_fn)
+            self.hooks.register_fn("on_error", "metrics_error", error_fn)
 
         # Consolidator — сжатие контекста при длинных разговорах
         consolidator_config = self.config.get("consolidator", {})

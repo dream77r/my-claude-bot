@@ -23,6 +23,7 @@ from claude_agent_sdk import (
 
 from . import memory
 from . import get_claude_cli_path
+from .input_sanitizer import sanitize_for_dream
 
 logger = logging.getLogger(__name__)
 
@@ -173,11 +174,23 @@ async def dream_cycle(
 
     memory_path = memory.get_memory_path(agent_dir)
 
-    # Подготовить контекст для Phase 1
-    conversations_text = "\n".join(
-        f"[{m.get('timestamp', '?')}] {m.get('role', '?')}: {m.get('content', '')[:500]}"
-        for m in messages
-    )
+    # Подготовить контекст для Phase 1 (с санитизацией для wiki-ingest)
+    sanitized_lines = []
+    injection_warnings = 0
+    for m in messages:
+        content = m.get("content", "")[:500]
+        cleaned, findings = sanitize_for_dream(content)
+        if findings:
+            injection_warnings += 1
+            cleaned = f"[SANITIZED: {', '.join(findings)}] {cleaned}"
+        sanitized_lines.append(
+            f"[{m.get('timestamp', '?')}] {m.get('role', '?')}: {cleaned}"
+        )
+    if injection_warnings:
+        logger.warning(
+            f"Dream: {injection_warnings} сообщений с подозрительным контентом"
+        )
+    conversations_text = "\n".join(sanitized_lines)
 
     profile_text = ""
     profile_path = memory_path / "profile.md"

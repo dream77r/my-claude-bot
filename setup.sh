@@ -65,6 +65,15 @@ if ! command -v git &>/dev/null; then
 fi
 echo -e "${GREEN}  ✓ git${RESET}"
 
+# Node.js (optional, for qmd semantic search)
+if command -v node &>/dev/null; then
+    NODE_VERSION=$(node --version)
+    echo -e "${GREEN}  ✓ Node.js ${NODE_VERSION} (for semantic search)${RESET}"
+else
+    echo -e "${YELLOW}  ○ Node.js not found (optional — for semantic wiki search)${RESET}"
+    echo "    Install: sudo apt install nodejs npm"
+fi
+
 # systemd user session
 if ! systemctl --user status &>/dev/null 2>&1; then
     echo -e "${YELLOW}  ⚠ systemd user session not available${RESET}"
@@ -164,7 +173,21 @@ fi
 echo ""
 echo -e "${BOLD}Installing Python packages...${RESET}"
 python3 -m pip install --user -q claude-agent-sdk python-telegram-bot python-dotenv pyyaml httpx 2>&1 | tail -3
-echo -e "${GREEN}  ✓ Packages installed${RESET}"
+echo -e "${GREEN}  ✓ Python packages installed${RESET}"
+
+# qmd — семантический поиск по wiki (требует Node.js)
+if command -v node &>/dev/null && command -v npm &>/dev/null; then
+    echo -e "${BOLD}Installing qmd (semantic search for wiki)...${RESET}"
+    npm install -g @tobilu/qmd --prefix ~/.local 2>&1 | tail -3
+    if [ -x "$HOME/.local/bin/qmd" ]; then
+        echo -e "${GREEN}  ✓ qmd installed (semantic wiki search)${RESET}"
+    else
+        echo -e "${YELLOW}  ⚠ qmd install failed — wiki search will use keyword fallback${RESET}"
+    fi
+else
+    echo -e "${YELLOW}  ⚠ Node.js not found — skipping qmd (semantic search)${RESET}"
+    echo "    Optional: sudo apt install nodejs npm && npm install -g @tobilu/qmd --prefix ~/.local"
+fi
 
 # ══════════════════════════════════════════
 # Create .env
@@ -226,6 +249,19 @@ systemctl --user enable my-claude-bot
 systemctl --user start my-claude-bot
 
 echo -e "${GREEN}  ✓ Service started${RESET}"
+
+# Initialize qmd collection for wiki (if qmd installed)
+if [ -x "$HOME/.local/bin/qmd" ]; then
+    echo -e "${BOLD}Initializing semantic search index...${RESET}"
+    MEMORY_DIR="${PROJECT_DIR}/agents/me/memory"
+    if [ -d "$MEMORY_DIR" ]; then
+        cd "$MEMORY_DIR"
+        "$HOME/.local/bin/qmd" collection add . --name me-wiki 2>/dev/null && \
+            echo -e "${GREEN}  ✓ Wiki indexed for semantic search${RESET}" || \
+            echo -e "${YELLOW}  ⚠ Wiki index failed (will retry on first search)${RESET}"
+        cd "$PROJECT_DIR"
+    fi
+fi
 
 # Wait for startup
 sleep 3
