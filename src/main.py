@@ -23,6 +23,7 @@ from .bus import FleetBus
 from .cron import cron_loop
 from .delegation import DelegationManager
 from .dream import dream_loop
+from .knowledge_graph import nightly_graph_loop
 from .heartbeat import heartbeat_loop
 from .orchestrator import Orchestrator
 from .skill_advisor import (
@@ -253,6 +254,19 @@ class FleetRuntime:
                 )
             )
             agent_tasks.append(cron_task)
+
+        # Knowledge Graph (ночной пайплайн связей)
+        kg_config = agent.config.get("knowledge_graph", {})
+        if kg_config.get("enabled", False):
+            kg_task = asyncio.create_task(
+                nightly_graph_loop(
+                    agent.agent_dir,
+                    config=kg_config,
+                    run_hour=kg_config.get("run_hour", 1),
+                    run_minute=kg_config.get("run_minute", 0),
+                )
+            )
+            agent_tasks.append(kg_task)
 
         self.register_running(agent, worker, bridge, agent_tasks)
         logger.info(f"Агент '{name}' запущен (hot-reload)")
@@ -578,6 +592,32 @@ async def async_main() -> None:
             tasks.append(cron_task)
             cron_names = [j["name"] for j in agent.config["cron"]]
             logger.info(f"Cron запущен для '{agent.name}': {', '.join(cron_names)}")
+
+    # ── Knowledge Graph (ночной пайплайн связей) ──
+    for agent in agents:
+        kg_config = agent.config.get("knowledge_graph", {})
+        if kg_config.get("enabled", False):
+            run_hour = kg_config.get("run_hour", 1)
+            run_minute = kg_config.get("run_minute", 0)
+            kg_task = asyncio.create_task(
+                nightly_graph_loop(
+                    agent.agent_dir,
+                    config=kg_config,
+                    run_hour=run_hour,
+                    run_minute=run_minute,
+                )
+            )
+            if agent.name in runtime.tasks:
+                runtime.tasks[agent.name].append(kg_task)
+            tasks.append(kg_task)
+            synthesis_schedule = kg_config.get("synthesis_schedule", {})
+            daily_phase = synthesis_schedule.get("daily_phase_days", 14)
+            regular = synthesis_schedule.get("regular_interval_days", 3)
+            logger.info(
+                f"Knowledge Graph запущен для '{agent.name}': "
+                f"{run_hour:02d}:{run_minute:02d} UTC, "
+                f"L3: ежедневно {daily_phase}д → каждые {regular}д"
+            )
 
     logger.info(
         f"Fleet запущен: {len(agents)} агентов, "

@@ -236,6 +236,60 @@ def search_wiki(agent_dir: str, query: str, max_results: int = 3) -> list[dict]:
         total_chars += len(page_content)
         trimmed.append({**r, "content": page_content})
 
+    # Бонус из графа связей: если найдены страницы, подтянуть связанные
+    try:
+        from .knowledge_graph import get_related_by_graph
+
+        # Собрать имена найденных сущностей
+        found_names = set()
+        for r in trimmed:
+            found_names.add(r["title"])
+
+        # Для каждой найденной сущности — проверить граф
+        graph_bonus_paths: list[str] = []
+        for name in found_names:
+            related = get_related_by_graph(agent_dir, name, max_results=2)
+            for rel in related:
+                if rel["strength"] >= 2:  # только сильные связи
+                    # Найти wiki-страницу для связанной сущности
+                    rel_name_slug = rel["name"].lower().replace(" ", "-")
+                    for md_file in wiki_dir.rglob("*.md"):
+                        if rel_name_slug in md_file.stem.lower():
+                            rel_path = str(md_file.relative_to(memory))
+                            # Не добавлять дубликаты
+                            if rel_path not in [r["path"] for r in trimmed]:
+                                graph_bonus_paths.append(rel_path)
+                            break
+
+        # Добавить связанные страницы (если есть бюджет)
+        for gpath in graph_bonus_paths[:2]:  # максимум 2 бонусных
+            full_path = memory / gpath
+            if not full_path.exists():
+                continue
+            try:
+                content = full_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            # Извлечь заголовок
+            title = Path(gpath).stem
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    title = stripped.lstrip("#").strip()
+                    break
+            if len(content) > _WIKI_MAX_PAGE_CHARS:
+                content = content[:_WIKI_MAX_PAGE_CHARS] + "..."
+            if total_chars + len(content) <= _WIKI_MAX_TOTAL_CHARS + 1000:
+                trimmed.append({
+                    "path": gpath,
+                    "title": f"{title} (via graph)",
+                    "content": content,
+                    "score": 0.5,  # ниже прямых совпадений
+                })
+                total_chars += len(content)
+    except ImportError:
+        pass  # knowledge_graph не установлен
+
     # Трекинг: отмечаем использование возвращённых страниц
     for r in trimmed:
         track_page_hit(agent_dir, r["path"])

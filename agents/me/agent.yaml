@@ -66,6 +66,20 @@ dream:
   model_phase1: "haiku"      # дешёвый вызов: извлечение фактов
   model_phase2: "sonnet"     # агентный вызов: обновление wiki
 
+# Knowledge Graph — ночной 3-уровневый граф связей памяти
+# Уровень 1: Линковка [[Obsidian]] связей в дневном логе
+# Уровень 2: Саммари дня с [[ссылками]] на wiki
+# Уровень 3: Синтез графа — перелинковка всех саммари
+knowledge_graph:
+  enabled: true
+  run_hour: 1                  # час запуска UTC (= 04:00 MSK)
+  run_minute: 0
+  model: "haiku"               # дешёвая модель для всех уровней
+  max_summaries: 30            # сколько саммари подавать в Уровень 3
+  synthesis_schedule:
+    daily_phase_days: 14       # первые 14 дней — Уровень 3 каждый день
+    regular_interval_days: 3   # потом — каждые 3 дня
+
 # Heartbeat — проактивные задачи (Smart Heartbeat с триггерами)
 heartbeat:
   enabled: true
