@@ -56,7 +56,35 @@ dream:
   model_phase1: "haiku"      # дешёвый вызов: извлечение фактов
   model_phase2: "sonnet"     # агентный вызов: обновление wiki
 
-# Heartbeat — проактивные задачи
+# Heartbeat — проактивные задачи (Smart Heartbeat с триггерами)
 heartbeat:
   enabled: true
   interval_minutes: 30
+  triggers:
+    - name: "morning_briefing"
+      schedule: "0 9 * * *"
+      prompt: |
+        Доброе утро! Подготовь утренний брифинг:
+        1. Прочитай wiki/concepts/ — есть ли задачи на сегодня?
+        2. Прочитай вчерашний daily — что обсуждали, что осталось?
+        3. Проверь дедлайны в wiki — есть ли что-то срочное?
+        Формат: краткий список на 3-5 пунктов. Только важное.
+      model: "sonnet"
+      notify: true
+    - name: "evening_digest"
+      schedule: "0 21 * * *"
+      prompt: |
+        Вечерний дайджест:
+        1. Прочитай сегодняшний daily — что обсуждали?
+        2. Что нового в wiki за сегодня?
+        3. Подведи итог: что сделано, что перенести на завтра.
+        Формат: 3-5 пунктов, кратко.
+      model: "haiku"
+      notify: true
+    - name: "deadline_check"
+      schedule: "0 */4 * * *"
+      prompt: |
+        Проверь wiki на задачи с приближающимися дедлайнами (ближайшие 48 часов).
+        Если есть — составь напоминание. Если нет — не уведомляй.
+      model: "haiku"
+      notify: "auto"

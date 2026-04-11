@@ -25,6 +25,7 @@ from .delegation import DelegationManager
 from .dream import dream_loop
 from .heartbeat import heartbeat_loop
 from .orchestrator import Orchestrator
+from .smart_heartbeat import SmartHeartbeat
 from .telegram_bridge import TelegramBridge
 
 # Логирование
@@ -195,16 +196,24 @@ class FleetRuntime:
             )
             agent_tasks.append(dream_task)
 
-        # Heartbeat
+        # Heartbeat (smart или legacy)
         hb_config = agent.config.get("heartbeat", {})
         if hb_config.get("enabled", False):
-            interval = hb_config.get("interval_minutes", 30.0)
-            hb_task = asyncio.create_task(
-                heartbeat_loop(
-                    agent.agent_dir, agent.name,
-                    bus=self.bus, interval_minutes=interval,
+            if hb_config.get("triggers"):
+                # Smart heartbeat с триггерами
+                smart_hb = SmartHeartbeat(
+                    agent.agent_dir, agent.name, hb_config, bus=self.bus,
                 )
-            )
+                hb_task = asyncio.create_task(smart_hb.run())
+            else:
+                # Legacy heartbeat
+                interval = hb_config.get("interval_minutes", 30.0)
+                hb_task = asyncio.create_task(
+                    heartbeat_loop(
+                        agent.agent_dir, agent.name,
+                        bus=self.bus, interval_minutes=interval,
+                    )
+                )
             agent_tasks.append(hb_task)
 
         # Cron
@@ -387,23 +396,41 @@ async def async_main() -> None:
             tasks.append(dream_task)
             logger.info(f"Dream loop запущен для '{agent.name}' (каждые {interval}ч)")
 
-    # ── Heartbeat ──
+    # ── Heartbeat (smart или legacy) ──
     for agent in agents:
         hb_config = agent.config.get("heartbeat", {})
         if hb_config.get("enabled", False):
-            interval = hb_config.get("interval_minutes", 30.0)
-            hb_task = asyncio.create_task(
-                heartbeat_loop(
-                    agent.agent_dir,
-                    agent.name,
-                    bus=bus,
-                    interval_minutes=interval,
+            if hb_config.get("triggers"):
+                # Smart heartbeat с триггерами
+                smart_hb = SmartHeartbeat(
+                    agent.agent_dir, agent.name, hb_config, bus=bus,
                 )
-            )
-            if agent.name in runtime.tasks:
-                runtime.tasks[agent.name].append(hb_task)
-            tasks.append(hb_task)
-            logger.info(f"Heartbeat запущен для '{agent.name}' (каждые {interval} мин)")
+                hb_task = asyncio.create_task(smart_hb.run())
+                trigger_names = [t["name"] for t in hb_config["triggers"]]
+                if agent.name in runtime.tasks:
+                    runtime.tasks[agent.name].append(hb_task)
+                tasks.append(hb_task)
+                logger.info(
+                    f"SmartHeartbeat запущен для '{agent.name}': "
+                    f"{', '.join(trigger_names)}"
+                )
+            else:
+                # Legacy heartbeat
+                interval = hb_config.get("interval_minutes", 30.0)
+                hb_task = asyncio.create_task(
+                    heartbeat_loop(
+                        agent.agent_dir,
+                        agent.name,
+                        bus=bus,
+                        interval_minutes=interval,
+                    )
+                )
+                if agent.name in runtime.tasks:
+                    runtime.tasks[agent.name].append(hb_task)
+                tasks.append(hb_task)
+                logger.info(
+                    f"Heartbeat запущен для '{agent.name}' (каждые {interval} мин)"
+                )
 
     # ── Cron ──
     for agent in agents:
