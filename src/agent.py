@@ -320,10 +320,13 @@ class Agent:
 
         return "\n".join(parts)
 
-    def build_system_prompt(self) -> str:
+    def build_system_prompt(self, user_query: str = "") -> str:
         """
         Собрать полный system prompt:
         SOUL.md + system_prompt из YAML + skills + memory context
+
+        Args:
+            user_query: текст сообщения пользователя для wiki-поиска
         """
         parts = []
 
@@ -341,8 +344,8 @@ class Agent:
         if skills:
             parts.append("## Скиллы\n\n" + skills)
 
-        # 4. Контекст из памяти (profile.md, index.md, daily note)
-        ctx = memory.read_context(self.agent_dir)
+        # 4. Контекст из памяти (profile.md, index.md, daily note, wiki search)
+        ctx = memory.read_context(self.agent_dir, user_query=user_query)
         if ctx:
             parts.append("## Контекст из памяти\n\n" + ctx)
 
@@ -460,7 +463,7 @@ class Agent:
         if group_chat_id is not None:
             system_prompt = self.build_group_system_prompt(group_chat_id)
         else:
-            system_prompt = self.build_system_prompt()
+            system_prompt = self.build_system_prompt(user_query=message)
 
         # Allowed tools
         allowed_tools = self._parse_allowed_tools()

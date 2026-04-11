@@ -120,9 +120,122 @@ def log_message(
         fh.write(log_entry)
 
 
-def read_context(agent_dir: str) -> str:
+STOP_WORDS = {
+    # Russian
+    "и", "в", "на", "с", "по", "для", "что", "как", "это", "не",
+    "а", "но", "или", "из", "к", "от", "до", "за", "о", "об",
+    "у", "же", "то", "бы", "ли", "мне", "мой", "мы", "вы", "он",
+    "она", "они", "его", "её", "их", "где", "когда", "кто",
+    "так", "все", "уже", "ещё", "тоже", "очень", "вот", "есть",
+    # English
+    "the", "a", "an", "is", "are", "was", "were", "be", "been",
+    "in", "on", "at", "to", "for", "of", "with", "and", "or",
+    "not", "this", "that", "it", "my", "your", "we", "they",
+    "what", "how", "can", "do", "has", "have",
+}
+
+# Максимум символов wiki-контекста в промпте
+_WIKI_MAX_TOTAL_CHARS = 4000
+# Максимум символов одной wiki-страницы
+_WIKI_MAX_PAGE_CHARS = 1500
+
+
+def _tokenize(text: str) -> set[str]:
+    """Разбить текст на множество слов-токенов (lowercase, без стоп-слов)."""
+    import re as _re
+    words = _re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text.lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 1}
+
+
+def search_wiki(agent_dir: str, query: str, max_results: int = 3) -> list[dict]:
     """
-    Прочитать контекст агента: profile.md + index.md.
+    Поиск релевантных wiki-страниц по пользовательскому запросу.
+
+    Стратегия:
+    1. Токенизировать запрос -> множество ключевых слов (без стоп-слов)
+    2. Для каждой wiki-страницы: рассчитать score (сколько слов запроса встречается)
+    3. Бонус: совпадение в заголовке (строка #) — x3
+    4. Бонус: совпадение в имени файла — x2
+    5. Вернуть top-N страниц с содержимым
+
+    Returns: [{path: str, title: str, content: str, score: float}, ...]
+    """
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return []
+
+    memory = get_memory_path(agent_dir)
+    wiki_dir = memory / "wiki"
+    if not wiki_dir.exists():
+        return []
+
+    scored: list[dict] = []
+
+    for md_file in wiki_dir.rglob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        # Извлечь заголовок (первая строка с #)
+        title = md_file.stem
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                title = stripped.lstrip("#").strip()
+                break
+
+        # Токенизировать содержимое, заголовок, имя файла
+        content_tokens = _tokenize(content)
+        title_tokens = _tokenize(title)
+        filename_tokens = _tokenize(md_file.stem)
+
+        # Подсчёт score
+        score = 0.0
+        for qt in query_tokens:
+            if qt in content_tokens:
+                score += 1.0
+            if qt in title_tokens:
+                score += 3.0
+            if qt in filename_tokens:
+                score += 2.0
+
+        if score > 0:
+            # Относительный путь внутри wiki/
+            rel_path = str(md_file.relative_to(wiki_dir))
+            scored.append({
+                "path": rel_path,
+                "title": title,
+                "content": content,
+                "score": score,
+            })
+
+    # Сортировка по score (убывание), взять top-N
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    results = scored[:max_results]
+
+    # Обрезать контент слишком длинных страниц
+    total_chars = 0
+    trimmed: list[dict] = []
+    for r in results:
+        page_content = r["content"]
+        if len(page_content) > _WIKI_MAX_PAGE_CHARS:
+            page_content = page_content[:_WIKI_MAX_PAGE_CHARS] + "..."
+        if total_chars + len(page_content) > _WIKI_MAX_TOTAL_CHARS:
+            remaining = _WIKI_MAX_TOTAL_CHARS - total_chars
+            if remaining > 200:
+                page_content = page_content[:remaining] + "..."
+            else:
+                break
+        total_chars += len(page_content)
+        trimmed.append({**r, "content": page_content})
+
+    return trimmed
+
+
+def read_context(agent_dir: str, user_query: str = "") -> str:
+    """
+    Прочитать контекст агента: profile.md + index.md + wiki search.
     Возвращает строку для system prompt.
     """
     memory = get_memory_path(agent_dir)
@@ -150,6 +263,14 @@ def read_context(agent_dir: str) -> str:
             text = "...(начало дня обрезано)\n" + text[-8000:]
         parts.append("\n## Сегодняшний лог\n")
         parts.append(text)
+
+    # Семантический поиск по wiki
+    if user_query:
+        wiki_results = search_wiki(agent_dir, user_query, max_results=3)
+        if wiki_results:
+            parts.append("\n## Релевантные знания из wiki\n")
+            for r in wiki_results:
+                parts.append(f"### {r['title']} ({r['path']})\n{r['content']}\n")
 
     return "\n".join(parts)
 

@@ -27,6 +27,7 @@ from src.memory import (
     read_context,
     read_group_context,
     save_session_id,
+    search_wiki,
     set_group_setting,
     update_group_rules,
 )
@@ -455,3 +456,147 @@ class TestGroupSettings:
         # set_group_setting вызывает ensure_group_dirs
         set_group_setting(agent_dir, GROUP_CHAT_ID, "key", "value")
         assert get_group_setting(agent_dir, GROUP_CHAT_ID, "key") == "value"
+
+
+# ── Wiki search tests ──
+
+
+class TestSearchWiki:
+    @pytest.fixture(autouse=True)
+    def setup_wiki(self, agent_dir):
+        """Создать тестовые wiki-страницы."""
+        self.agent_dir = agent_dir
+        memory = get_memory_path(agent_dir)
+
+        # Страница про ценообразование
+        pricing_dir = memory / "wiki" / "concepts"
+        pricing_dir.mkdir(parents=True, exist_ok=True)
+        (pricing_dir / "pricing.md").write_text(
+            "# Стратегия ценообразования\n\n"
+            "## Текущая модель\n"
+            "- Freemium: бесплатный тариф + Pro за $29/мес\n"
+            "- Enterprise: индивидуальные цены от $199/мес\n"
+            "- Скидка 20% при годовой оплате\n\n"
+            "## Принципы\n"
+            "- Цена должна отражать ценность\n"
+            "- Конверсия free->pro целевая: 5-8%\n",
+            encoding="utf-8",
+        )
+
+        # Страница про архитектуру
+        arch_dir = memory / "wiki" / "entities"
+        arch_dir.mkdir(parents=True, exist_ok=True)
+        (arch_dir / "architecture.md").write_text(
+            "# Архитектура системы\n\n"
+            "## Компоненты\n"
+            "- Telegram Bot API\n"
+            "- Claude CLI\n"
+            "- File-based memory\n",
+            encoding="utf-8",
+        )
+
+        # Страница про команду
+        (arch_dir / "team.md").write_text(
+            "# Команда проекта\n\n"
+            "- Алексей — основатель, продукт\n"
+            "- Марина — маркетинг, цены\n",
+            encoding="utf-8",
+        )
+
+    def test_finds_relevant_page(self):
+        results = search_wiki(self.agent_dir, "какая у нас стратегия цен")
+        assert len(results) > 0
+        # pricing.md должен быть первым
+        assert "pricing" in results[0]["path"] or "ценообразовани" in results[0]["title"].lower()
+
+    def test_no_results_for_greetings(self):
+        results = search_wiki(self.agent_dir, "привет как дела")
+        assert len(results) == 0
+
+    def test_empty_query_returns_empty(self):
+        results = search_wiki(self.agent_dir, "")
+        assert results == []
+
+    def test_stop_words_only_returns_empty(self):
+        results = search_wiki(self.agent_dir, "и в на с по для")
+        assert results == []
+
+    def test_title_match_scores_higher(self):
+        results = search_wiki(self.agent_dir, "архитектура")
+        assert len(results) > 0
+        assert "architecture" in results[0]["path"]
+
+    def test_filename_match_bonus(self):
+        results = search_wiki(self.agent_dir, "pricing")
+        assert len(results) > 0
+        assert "pricing" in results[0]["path"]
+
+    def test_max_results_respected(self):
+        results = search_wiki(self.agent_dir, "проект команда цены архитектура", max_results=2)
+        assert len(results) <= 2
+
+    def test_truncates_long_pages(self):
+        """Длинные страницы обрезаются до _WIKI_MAX_PAGE_CHARS."""
+        memory = get_memory_path(self.agent_dir)
+        long_page = memory / "wiki" / "concepts" / "long-page.md"
+        long_page.write_text(
+            "# Длинная страница\n\n" + "уникальноеслово " * 500,
+            encoding="utf-8",
+        )
+        results = search_wiki(self.agent_dir, "уникальноеслово")
+        assert len(results) > 0
+        assert results[0]["content"].endswith("...")
+
+    def test_returns_correct_structure(self):
+        results = search_wiki(self.agent_dir, "архитектура")
+        assert len(results) > 0
+        r = results[0]
+        assert "path" in r
+        assert "title" in r
+        assert "content" in r
+        assert "score" in r
+        assert isinstance(r["score"], float)
+        assert r["score"] > 0
+
+    def test_no_wiki_dir_returns_empty(self, tmp_path):
+        """Если wiki/ не существует — пустой результат."""
+        empty_agent = tmp_path / "empty_agent"
+        empty_agent.mkdir()
+        results = search_wiki(str(empty_agent), "тест")
+        assert results == []
+
+    def test_multiple_query_words_increase_score(self):
+        """Больше слов из запроса в документе -> выше score."""
+        results = search_wiki(self.agent_dir, "цена freemium конверсия")
+        assert len(results) > 0
+        # pricing.md должен быть первым — содержит все слова
+        assert "pricing" in results[0]["path"]
+
+
+class TestReadContextWithQuery:
+    def test_backward_compatibility(self, agent_dir):
+        """Без user_query поведение не меняется."""
+        memory = get_memory_path(agent_dir)
+        (memory / "profile.md").write_text("# Профиль\nТест")
+        ctx_old = read_context(agent_dir)
+        ctx_new = read_context(agent_dir, user_query="")
+        assert ctx_old == ctx_new
+
+    def test_includes_wiki_when_query_matches(self, agent_dir):
+        """С user_query подтягиваются wiki-страницы."""
+        memory = get_memory_path(agent_dir)
+        wiki_dir = memory / "wiki" / "concepts"
+        wiki_dir.mkdir(parents=True, exist_ok=True)
+        (wiki_dir / "roadmap.md").write_text(
+            "# Дорожная карта\n\nQ2: запуск MVP\nQ3: масштабирование\n",
+            encoding="utf-8",
+        )
+
+        ctx = read_context(agent_dir, user_query="какая у нас дорожная карта")
+        assert "Релевантные знания из wiki" in ctx
+        assert "Дорожная карта" in ctx
+
+    def test_no_wiki_section_when_no_matches(self, agent_dir):
+        """Если ничего не найдено — секция wiki не добавляется."""
+        ctx = read_context(agent_dir, user_query="привет как дела")
+        assert "Релевантные знания из wiki" not in ctx
