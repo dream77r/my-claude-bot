@@ -263,6 +263,8 @@ class StatusMessage:
         self._pending_text: str | None = None
         self._pending_task: asyncio.Task | None = None
         self._typing_task: asyncio.Task | None = None
+        self._thinking_start: float | None = None
+        self._thinking_timer_task: asyncio.Task | None = None
         self._is_streaming: bool = False
 
     async def show(self, text: str, streaming: bool = False) -> None:
@@ -292,6 +294,7 @@ class StatusMessage:
             False если нужен новый send (длинный текст, ошибка edit).
         """
         self._stop_typing()
+        self.stop_thinking_timer()
         if self._pending_task and not self._pending_task.done():
             self._pending_task.cancel()
 
@@ -321,6 +324,7 @@ class StatusMessage:
     async def cleanup(self) -> None:
         """Удалить статус-сообщение после завершения."""
         self._stop_typing()
+        self.stop_thinking_timer()
         if self._pending_task and not self._pending_task.done():
             self._pending_task.cancel()
         if self.message_id:
@@ -358,6 +362,31 @@ class StatusMessage:
                 except Exception:
                     pass
                 await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+
+    def start_thinking_timer(self) -> None:
+        """Запустить таймер 'Думаю... (Xс)', обновляется каждые 10 секунд."""
+        self._thinking_start = time.monotonic()
+        if self._thinking_timer_task and not self._thinking_timer_task.done():
+            return
+        self._thinking_timer_task = asyncio.create_task(self._thinking_timer_loop())
+
+    def stop_thinking_timer(self) -> None:
+        """Остановить таймер 'Думаю...'."""
+        if self._thinking_timer_task and not self._thinking_timer_task.done():
+            self._thinking_timer_task.cancel()
+            self._thinking_timer_task = None
+
+    async def _thinking_timer_loop(self) -> None:
+        """Цикл обновления 'Думаю... (10с)', '(20с)' и т.д."""
+        try:
+            while True:
+                await asyncio.sleep(10)
+                if self._thinking_start is None:
+                    break
+                elapsed = int(time.monotonic() - self._thinking_start)
+                await self._do_edit(f"Думаю... ({elapsed}с)")
         except asyncio.CancelledError:
             pass
 
@@ -2430,22 +2459,23 @@ class TelegramBridge:
                     old_status = self._status_messages.pop(chat_id, None)
                     if old_status:
                         old_status._stop_typing()
+                        old_status.stop_thinking_timer()
                     # Создать статус-сообщение с typing keepalive
                     status = StatusMessage(chat_id, app, thread_id)
                     await status.show("Думаю...")
                     status.start_typing()
+                    status.start_thinking_timer()
                     self._status_messages[chat_id] = status
 
                 elif event == "tool_use":
-                    # Обновить статус (tool hint)
-                    status = self._status_messages.get(chat_id)
-                    if status:
-                        await status.show(f"⏳ {msg.content}")
+                    # Не показываем tool hints в чате — только таймер "Думаю..."
+                    pass
 
                 elif event == "text_delta":
                     # Streaming: показать накопленный текст (быстрый интервал)
                     status = self._status_messages.get(chat_id)
                     if status:
+                        status.stop_thinking_timer()
                         # Обрезать до лимита Telegram
                         preview = msg.content[:TG_MESSAGE_LIMIT - 20]
                         if len(msg.content) > TG_MESSAGE_LIMIT - 20:
