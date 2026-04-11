@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 
 from src.memory import (
+    CONTEXT_BUDGET,
+    STOP_WORDS,
+    _get_hot_pages,
+    _read_daily_smart,
+    _read_with_limit,
+    _tokenize,
     archive_old_conversations,
+    build_smart_context,
     clear_session_id,
     create_group_context,
     ensure_daily_note,
@@ -27,7 +34,9 @@ from src.memory import (
     read_context,
     read_group_context,
     save_session_id,
+    search_wiki,
     set_group_setting,
+    track_page_hit,
     update_group_rules,
 )
 
@@ -455,3 +464,499 @@ class TestGroupSettings:
         # set_group_setting вызывает ensure_group_dirs
         set_group_setting(agent_dir, GROUP_CHAT_ID, "key", "value")
         assert get_group_setting(agent_dir, GROUP_CHAT_ID, "key") == "value"
+
+
+# ── Tokenize & Search Wiki tests ──
+
+
+class TestTokenize:
+    def test_basic_tokenization(self):
+        tokens = _tokenize("Привет мир это тест")
+        assert "привет" in tokens
+        assert "мир" in tokens
+        assert "тест" in tokens
+
+    def test_removes_stop_words(self):
+        tokens = _tokenize("это в и на для")
+        assert tokens == []
+
+    def test_removes_short_words(self):
+        tokens = _tokenize("a b c word")
+        assert tokens == ["word"]
+
+    def test_lowercase(self):
+        tokens = _tokenize("Hello WORLD Мир")
+        assert "hello" in tokens
+        assert "world" in tokens
+        assert "мир" in tokens
+
+    def test_empty_string(self):
+        assert _tokenize("") == []
+
+    def test_numbers_included(self):
+        tokens = _tokenize("версия 42 проект")
+        assert "42" in tokens
+        assert "версия" in tokens
+
+
+class TestSearchWiki:
+    def test_finds_relevant_page(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        wiki.mkdir(parents=True, exist_ok=True)
+        (wiki / "pricing.md").write_text(
+            "# Ценообразование\nМодель подписки: базовый план 10$, про план 25$"
+        )
+
+        results = search_wiki(agent_dir, "ценообразование подписка")
+        assert len(results) >= 1
+        assert "pricing.md" in results[0]["path"]
+        assert results[0]["score"] > 0
+
+    def test_returns_empty_for_no_match(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "pricing.md").write_text("# Ценообразование\nПлан подписки")
+
+        results = search_wiki(agent_dir, "квантовая физика")
+        assert results == []
+
+    def test_respects_max_results(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        for i in range(5):
+            (wiki / f"page{i}.md").write_text(f"# Страница {i}\nОбщая тема проект")
+
+        results = search_wiki(agent_dir, "проект тема", max_results=2)
+        assert len(results) <= 2
+
+    def test_title_bonus(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        # Страница с совпадением в заголовке должна быть выше
+        (wiki / "target.md").write_text("# Маркетинг стратегия\nПлан продвижения")
+        (wiki / "other.md").write_text("# Финансы\nМаркетинг бюджет расходы")
+
+        results = search_wiki(agent_dir, "маркетинг")
+        assert len(results) >= 1
+        assert "target.md" in results[0]["path"]
+
+    def test_empty_query(self, agent_dir):
+        results = search_wiki(agent_dir, "")
+        assert results == []
+
+    def test_no_wiki_dir(self, tmp_path):
+        agent = tmp_path / "agents" / "nowiki"
+        agent.mkdir(parents=True)
+        results = search_wiki(str(agent), "тест")
+        assert results == []
+
+    def test_tracks_hits_for_returned_pages(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "tracked.md").write_text("# Трекинг\nТестовая страница трекинга")
+
+        search_wiki(agent_dir, "трекинг тестовая")
+        hits_file = memory / "stats" / "page_hits.json"
+        assert hits_file.exists()
+        data = json.loads(hits_file.read_text())
+        # Должна быть запись для найденной страницы
+        assert any("tracked.md" in k for k in data)
+
+
+# ── Read With Limit tests ──
+
+
+class TestReadWithLimit:
+    def test_short_file(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        test_file = memory / "test.md"
+        test_file.write_text("Short content")
+        result = _read_with_limit(test_file, 1000)
+        assert result == "Short content"
+
+    def test_truncates_long_file(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        test_file = memory / "test.md"
+        test_file.write_text("x" * 5000)
+        result = _read_with_limit(test_file, 100)
+        assert len(result) == 103  # 100 + "..."
+        assert result.endswith("...")
+
+    def test_nonexistent_file(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        result = _read_with_limit(memory / "nonexistent.md", 1000)
+        assert result == ""
+
+    def test_exact_limit(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        test_file = memory / "test.md"
+        test_file.write_text("x" * 100)
+        result = _read_with_limit(test_file, 100)
+        assert result == "x" * 100  # exact — no truncation
+
+
+# ── Track Page Hit tests ──
+
+
+class TestTrackPageHit:
+    def test_creates_hits_file(self, agent_dir):
+        track_page_hit(agent_dir, "wiki/concepts/pricing.md")
+        memory = get_memory_path(agent_dir)
+        hits_file = memory / "stats" / "page_hits.json"
+        assert hits_file.exists()
+        data = json.loads(hits_file.read_text())
+        assert "wiki/concepts/pricing.md" in data
+        assert data["wiki/concepts/pricing.md"]["hits"] == 1
+
+    def test_increments_hits(self, agent_dir):
+        track_page_hit(agent_dir, "wiki/concepts/pricing.md")
+        track_page_hit(agent_dir, "wiki/concepts/pricing.md")
+        track_page_hit(agent_dir, "wiki/concepts/pricing.md")
+
+        memory = get_memory_path(agent_dir)
+        hits_file = memory / "stats" / "page_hits.json"
+        data = json.loads(hits_file.read_text())
+        assert data["wiki/concepts/pricing.md"]["hits"] == 3
+
+    def test_updates_last_date(self, agent_dir):
+        track_page_hit(agent_dir, "wiki/concepts/pricing.md")
+        memory = get_memory_path(agent_dir)
+        hits_file = memory / "stats" / "page_hits.json"
+        data = json.loads(hits_file.read_text())
+        today = datetime.now().strftime("%Y-%m-%d")
+        assert data["wiki/concepts/pricing.md"]["last"] == today
+
+    def test_multiple_pages(self, agent_dir):
+        track_page_hit(agent_dir, "wiki/concepts/pricing.md")
+        track_page_hit(agent_dir, "wiki/entities/team.md")
+
+        memory = get_memory_path(agent_dir)
+        hits_file = memory / "stats" / "page_hits.json"
+        data = json.loads(hits_file.read_text())
+        assert len(data) == 2
+        assert "wiki/concepts/pricing.md" in data
+        assert "wiki/entities/team.md" in data
+
+    def test_handles_corrupt_file(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        (stats_dir / "page_hits.json").write_text("not json{{{")
+
+        # Не должно падать, должно перезаписать
+        track_page_hit(agent_dir, "wiki/test.md")
+        data = json.loads((stats_dir / "page_hits.json").read_text())
+        assert data["wiki/test.md"]["hits"] == 1
+
+
+# ── Get Hot Pages tests ──
+
+
+class TestGetHotPages:
+    def test_returns_popular_pages(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        # Создать wiki-страницу
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "pricing.md").write_text("# Ценообразование\nМодель подписки")
+
+        # Создать stats
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {
+            "wiki/concepts/pricing.md": {"hits": 10, "last": today}
+        }
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        result = _get_hot_pages(agent_dir, 3000)
+        assert "Ценообразование" in result
+
+    def test_excludes_cold_pages(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "old.md").write_text("# Старая страница")
+
+        old_date = (datetime.now() - timedelta(days=31)).strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {
+            "wiki/concepts/old.md": {"hits": 100, "last": old_date}
+        }
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        result = _get_hot_pages(agent_dir, 3000)
+        assert result == ""
+
+    def test_respects_budget(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        # Создать большую страницу
+        (wiki / "big.md").write_text("x" * 5000)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {"wiki/concepts/big.md": {"hits": 10, "last": today}}
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        result = _get_hot_pages(agent_dir, 200)
+        assert len(result) <= 203  # 200 + "..."
+
+    def test_excludes_specified_paths(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "pricing.md").write_text("# Ценообразование")
+        (wiki / "team.md").write_text("# Команда")
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {
+            "wiki/concepts/pricing.md": {"hits": 10, "last": today},
+            "wiki/concepts/team.md": {"hits": 5, "last": today},
+        }
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        result = _get_hot_pages(
+            agent_dir, 3000, exclude=["wiki/concepts/pricing.md"]
+        )
+        assert "Ценообразование" not in result
+        assert "Команда" in result
+
+    def test_no_stats_file(self, agent_dir):
+        result = _get_hot_pages(agent_dir, 3000)
+        assert result == ""
+
+    def test_decay_scoring(self, agent_dir):
+        """Страница с меньшим кол-вом хитов, но более свежая,
+        может обогнать старую с большим кол-вом."""
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "fresh.md").write_text("# Свежая")
+        (wiki / "stale.md").write_text("# Устаревшая")
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        old_date = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {
+            "wiki/concepts/fresh.md": {"hits": 5, "last": today},
+            # 10 * 0.9^20 = 10 * 0.1216 = 1.216
+            "wiki/concepts/stale.md": {"hits": 10, "last": old_date},
+        }
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        # fresh: 5 * 1.0 = 5.0
+        # stale: 10 * 0.9^20 ≈ 1.2
+        result = _get_hot_pages(agent_dir, 100)
+        # С бюджетом 100 — только одна страница, должна быть fresh
+        assert "Свежая" in result
+
+
+# ── Read Daily Smart tests ──
+
+
+class TestReadDailySmart:
+    def test_short_daily_returned_as_is(self, agent_dir):
+        """Если daily помещается в бюджет — возвращаем как есть."""
+        memory = get_memory_path(agent_dir)
+        daily_dir = memory / "daily"
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily_path = daily_dir / f"{today}.md"
+        daily_path.write_text("# 2026-04-11\n\n**10:00** 👤 Привет\n**10:05** 🤖 Здравствуй\n")
+
+        budget = {"daily_recent": 2000, "daily_summary": 1000}
+        result = _read_daily_smart(agent_dir, budget)
+        assert "Привет" in result
+        assert "Здравствуй" in result
+
+    def test_long_daily_splits(self, agent_dir):
+        """Длинный daily разбивается на summary + recent."""
+        memory = get_memory_path(agent_dir)
+        daily_dir = memory / "daily"
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily_path = daily_dir / f"{today}.md"
+
+        # Создать daily с множеством записей
+        content = f"# {today}\n\n"
+        for i in range(50):
+            h = 8 + i // 6
+            m = (i * 10) % 60
+            content += f"\n**{h:02d}:{m:02d}** 👤 Сообщение номер {i} с деталями " + "x" * 100 + "\n"
+
+        daily_path.write_text(content)
+
+        budget = {"daily_recent": 500, "daily_summary": 300}
+        result = _read_daily_smart(agent_dir, budget)
+
+        # Должен содержать краткое содержание
+        assert "краткое содержание" in result
+        # Общий размер должен быть ограничен
+        assert len(result) < len(content)
+
+    def test_no_daily_file(self, agent_dir):
+        budget = {"daily_recent": 2000, "daily_summary": 1000}
+        result = _read_daily_smart(agent_dir, budget)
+        assert result == ""
+
+    def test_recent_messages_preserved_full(self, agent_dir):
+        """Последние сообщения сохраняются полностью."""
+        memory = get_memory_path(agent_dir)
+        daily_dir = memory / "daily"
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily_path = daily_dir / f"{today}.md"
+
+        content = f"# {today}\n\n"
+        # Много ранних сообщений
+        for i in range(30):
+            content += f"\n**08:{i:02d}** 👤 Раннее сообщение {i} " + "y" * 80 + "\n"
+        # Несколько последних
+        content += "\n**23:50** 👤 Важное последнее сообщение с полным текстом\n"
+        content += "\n**23:55** 🤖 Ответ на последнее\n"
+
+        daily_path.write_text(content)
+
+        budget = {"daily_recent": 500, "daily_summary": 200}
+        result = _read_daily_smart(agent_dir, budget)
+
+        # Последние сообщения должны быть полностью
+        assert "Важное последнее сообщение с полным текстом" in result
+        assert "Ответ на последнее" in result
+
+
+# ── Build Smart Context tests ──
+
+
+class TestBuildSmartContext:
+    def test_includes_profile(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        (memory / "profile.md").write_text("# Профиль\nФаундер, 35 лет")
+
+        ctx = build_smart_context(agent_dir)
+        assert "Фаундер" in ctx
+        assert "Профиль пользователя" in ctx
+
+    def test_includes_index(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        (memory / "index.md").write_text("# Каталог\n- Проект X\n- Проект Y")
+
+        ctx = build_smart_context(agent_dir)
+        assert "Проект X" in ctx
+        assert "Каталог знаний" in ctx
+
+    def test_includes_wiki_search_results(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "pricing.md").write_text("# Ценообразование\nМодель подписки: базовый план 10$")
+
+        ctx = build_smart_context(agent_dir, user_query="ценообразование подписка")
+        assert "Релевантные знания" in ctx
+        assert "Ценообразование" in ctx
+
+    def test_includes_daily(self, agent_dir):
+        log_message(agent_dir, "user", "Тестовое сообщение для smart context")
+
+        ctx = build_smart_context(agent_dir)
+        assert "Тестовое сообщение" in ctx
+
+    def test_includes_hot_pages(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "team.md").write_text("# Команда\nСписок участников")
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {"wiki/concepts/team.md": {"hits": 10, "last": today}}
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        ctx = build_smart_context(agent_dir)
+        assert "Часто используемые" in ctx
+        assert "Команда" in ctx
+
+    def test_deduplication_wiki_and_hot(self, agent_dir):
+        """Wiki search результаты не дублируются в hot pages."""
+        memory = get_memory_path(agent_dir)
+        wiki = memory / "wiki" / "concepts"
+        (wiki / "pricing.md").write_text("# Ценообразование\nМодель подписки")
+
+        # Сделать pricing.md и hot page
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {"wiki/concepts/pricing.md": {"hits": 20, "last": today}}
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        ctx = build_smart_context(agent_dir, user_query="ценообразование подписка")
+        # Должна быть в "Релевантные знания", но НЕ в "Часто используемые"
+        assert "Релевантные знания" in ctx
+        # Подсчитать количество вхождений "Ценообразование" — должно быть ровно 1
+        assert ctx.count("# Ценообразование") == 1
+
+    def test_empty_if_no_files(self, agent_dir):
+        ctx = build_smart_context(agent_dir)
+        assert ctx == ""
+
+    def test_custom_budget(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        (memory / "profile.md").write_text("x" * 5000)
+
+        custom_budget = {
+            "profile": 100,
+            "hot_pages": 0,
+            "wiki_search": 0,
+            "daily_recent": 0,
+            "daily_summary": 0,
+            "index": 0,
+        }
+        ctx = build_smart_context(agent_dir, budget=custom_budget)
+        # Profile должен быть обрезан до 100 + "..."
+        assert "..." in ctx
+        assert len(ctx) < 200
+
+    def test_backward_compat_read_context(self, agent_dir):
+        """read_context() по-прежнему работает (не сломан)."""
+        memory = get_memory_path(agent_dir)
+        (memory / "profile.md").write_text("# Профиль\nФаундер")
+        (memory / "index.md").write_text("# Каталог\n- Проект")
+
+        ctx = read_context(agent_dir)
+        assert "Фаундер" in ctx
+        assert "Проект" in ctx
+
+    def test_total_context_within_limit(self, agent_dir):
+        """Суммарный контекст не превышает разумный лимит."""
+        memory = get_memory_path(agent_dir)
+        (memory / "profile.md").write_text("# Профиль\n" + "x" * 3000)
+        (memory / "index.md").write_text("# Каталог\n" + "y" * 3000)
+
+        wiki = memory / "wiki" / "concepts"
+        for i in range(10):
+            (wiki / f"page{i}.md").write_text(f"# Страница {i}\n" + "z" * 1000)
+
+        # Много daily записей
+        for i in range(100):
+            log_message(agent_dir, "user", f"Сообщение {i} " + "w" * 50)
+
+        # Hot pages
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats_dir = memory / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        hits_data = {}
+        for i in range(10):
+            hits_data[f"wiki/concepts/page{i}.md"] = {"hits": 10 - i, "last": today}
+        (stats_dir / "page_hits.json").write_text(json.dumps(hits_data))
+
+        ctx = build_smart_context(agent_dir, user_query="страница тест")
+        # Суммарный бюджет ~11500 + заголовки секций, допускаем запас
+        assert len(ctx) < 15000
+
+
+# ── Ensure Dirs includes stats ──
+
+
+class TestEnsureDirsStats:
+    def test_creates_stats_dir(self, agent_dir):
+        memory = get_memory_path(agent_dir)
+        assert (memory / "stats").is_dir()
