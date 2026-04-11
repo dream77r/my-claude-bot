@@ -320,6 +320,30 @@ class Agent:
 
         return "\n".join(parts)
 
+    @staticmethod
+    def _build_file_instructions(outbox_path: str) -> str:
+        """Инструкция для Claude: как отправить файл пользователю через outbox."""
+        return (
+            "## Работа с файлами\n\n"
+            "Пользователь может отправлять тебе файлы для анализа. "
+            "Пути к файлам указаны в сообщении — читай их через Read.\n\n"
+            "### Отправка файлов пользователю\n"
+            "Чтобы отправить файл обратно пользователю в Telegram, "
+            f"сохрани его в директорию outbox: `{outbox_path}/`\n\n"
+            "Примеры:\n"
+            f"- Изменённый файл: `Write` → `{outbox_path}/result.txt`\n"
+            f"- Отчёт: `Write` → `{outbox_path}/report.md`\n"
+            f"- Исправленный код: `Write` → `{outbox_path}/fixed_code.py`\n\n"
+            "Правила:\n"
+            "- Имя файла в outbox = имя файла, которое получит пользователь\n"
+            "- Можно отправить несколько файлов за раз\n"
+            "- Файлы из outbox автоматически отправятся после твоего ответа\n"
+            "- Если пользователь просит проанализировать файл — "
+            "просто ответь текстом, без outbox\n"
+            "- Используй outbox только когда пользователь явно просит "
+            "отправить/вернуть/сохранить файл"
+        )
+
     def build_system_prompt(self, user_query: str = "") -> str:
         """
         Собрать полный system prompt:
@@ -366,7 +390,11 @@ class Agent:
                     "Контекст был сжат. Вот краткая сводка:\n\n" + summary
                 )
 
-        # 7. Языковая инструкция
+        # 7. Инструкция по работе с файлами (outbox)
+        outbox_path = Path(self.agent_dir) / "memory" / "outbox"
+        parts.append(self._build_file_instructions(str(outbox_path.resolve())))
+
+        # 8. Языковая инструкция
         lang = memory.get_setting(self.agent_dir, "language")
         if lang:
             parts.append(t("system_lang_instruction", lang))
@@ -415,6 +443,10 @@ class Agent:
         ctx = memory.read_group_context(self.agent_dir, chat_id)
         if ctx:
             parts.append("## Контекст из памяти\n\n" + ctx)
+
+        # 6. Инструкция по работе с файлами (outbox)
+        outbox_path = Path(self.agent_dir) / "memory" / "outbox"
+        parts.append(self._build_file_instructions(str(outbox_path.resolve())))
 
         return "\n\n---\n\n".join(parts)
 

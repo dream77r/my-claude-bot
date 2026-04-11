@@ -41,6 +41,7 @@ def ensure_dirs(agent_dir: str) -> None:
         "raw/conversations",
         "sessions",
         "stats",
+        "outbox",
     ]:
         (memory / subdir).mkdir(parents=True, exist_ok=True)
 

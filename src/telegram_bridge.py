@@ -16,6 +16,7 @@ import asyncio
 import logging
 import re
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -32,7 +33,7 @@ from telegram.ext import (
 
 from . import memory
 from .command_router import CommandRouter
-from .file_handler import download_file
+from .file_handler import download_file, send_file
 from .i18n import t
 from .voice_handler import download_voice, get_deepgram_api_key, transcribe
 
@@ -1230,6 +1231,17 @@ class TelegramBridge:
                 chat_id, response, context, message_thread_id=thread_id
             )
 
+            # Отправить файлы из outbox (fallback режим)
+            from .file_handler import scan_outbox, clear_outbox
+            outbox_files = scan_outbox(self.agent.agent_dir)
+            if outbox_files:
+                for fpath in outbox_files:
+                    try:
+                        await send_file(context.bot, chat_id, fpath)
+                    except Exception as fe:
+                        logger.error(f"Outbox send error: {fe}")
+                clear_outbox(self.agent.agent_dir)
+
         except asyncio.CancelledError:
             await status.cleanup()
             logger.info(f"Request cancelled for chat {chat_id}")
@@ -1730,6 +1742,11 @@ class TelegramBridge:
                     await self._send_via_bot(
                         app, chat_id, msg.content, thread_id
                     )
+                    # Отправить файлы из outbox (если есть)
+                    if msg.files:
+                        await self._send_outbox_files(
+                            app, chat_id, msg.files, thread_id
+                        )
 
                 elif event == "error":
                     status = self._status_messages.pop(chat_id, None)
@@ -1769,3 +1786,26 @@ class TelegramBridge:
                 logger.error(f"Send error to {chat_id}: {e}")
             if len(parts) > 1:
                 await asyncio.sleep(0.3)
+
+    async def _send_outbox_files(
+        self,
+        app: Application,
+        chat_id: int,
+        file_paths: list[str],
+        message_thread_id: int | None = None,
+    ) -> None:
+        """Отправить файлы из outbox в Telegram чат."""
+        for fpath in file_paths:
+            try:
+                await send_file(app.bot, chat_id, fpath)
+                logger.info(f"Outbox файл отправлен: {fpath} → {chat_id}")
+            except Exception as e:
+                logger.error(f"Outbox send error ({fpath}): {e}")
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Не удалось отправить файл: {Path(fpath).name}",
+                        message_thread_id=message_thread_id,
+                    )
+                except Exception:
+                    pass

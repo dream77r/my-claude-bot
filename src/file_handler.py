@@ -3,16 +3,23 @@
 
 Файлы сохраняются в agents/{name}/memory/raw/files/
 с уникальными именами (timestamp + оригинальное имя).
+
+Outbox: agents/{name}/memory/outbox/ — файлы для отправки пользователю.
+Claude кладёт туда файлы, pipeline сканирует и отправляет в Telegram.
 """
 
 import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 from telegram import Bot
 
 logger = logging.getLogger(__name__)
+
+# Директория outbox (относительно agent_dir)
+OUTBOX_SUBDIR = "memory/outbox"
 
 # Максимальный размер файла для скачивания (20MB)
 MAX_FILE_SIZE = 20 * 1024 * 1024
@@ -96,3 +103,51 @@ async def send_file(bot: Bot, chat_id: int, file_path: str) -> None:
         logger.info(f"Файл отправлен: {path.name} → chat {chat_id}")
     except Exception as e:
         raise RuntimeError(f"Не удалось отправить файл: {e}") from e
+
+
+def scan_outbox(agent_dir: str) -> list[str]:
+    """
+    Сканировать outbox на наличие файлов для отправки.
+
+    Returns:
+        Список абсолютных путей к файлам в outbox
+    """
+    outbox = Path(agent_dir) / OUTBOX_SUBDIR
+    if not outbox.exists():
+        return []
+
+    files = []
+    for item in sorted(outbox.iterdir()):
+        if item.is_file() and not item.name.startswith("."):
+            files.append(str(item))
+
+    return files
+
+
+def clear_outbox(agent_dir: str) -> int:
+    """
+    Архивировать файлы из outbox в raw/files/sent/, затем удалить из outbox.
+
+    Returns:
+        Количество обработанных файлов
+    """
+    outbox = Path(agent_dir) / OUTBOX_SUBDIR
+    if not outbox.exists():
+        return 0
+
+    sent_dir = Path(agent_dir) / "memory" / "raw" / "files" / "sent"
+    sent_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    count = 0
+    for item in outbox.iterdir():
+        if item.is_file():
+            try:
+                archive_name = f"{timestamp}_{item.name}"
+                shutil.copy2(item, sent_dir / archive_name)
+                item.unlink()
+                count += 1
+            except OSError as e:
+                logger.warning(f"Не удалось обработать {item}: {e}")
+
+    return count

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from .bus import FleetBus, FleetMessage, MessageType
 from .delegation import DELEGATION_TIMEOUT
+from .file_handler import scan_outbox, clear_outbox
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -124,15 +125,29 @@ class AgentWorker:
                 group_chat_id=group_chat_id,
             )
 
-            # Опубликовать ответ
+            # Проверить outbox на файлы для отправки
+            outbox_files = scan_outbox(self.agent.agent_dir)
+            if outbox_files:
+                logger.info(
+                    f"Outbox: {len(outbox_files)} файл(ов) для отправки "
+                    f"от '{self.agent.name}'"
+                )
+
+            # Опубликовать ответ (с файлами из outbox если есть)
             await self.bus.publish(FleetMessage(
                 source=f"agent:{self.agent.name}",
                 target=f"telegram:{self.agent.name}",
                 content=response,
                 msg_type=MessageType.OUTBOUND,
                 chat_id=chat_id,
+                files=outbox_files,
                 metadata={**base_meta, "event": "response", "in_reply_to": msg.id},
             ))
+
+            # Очистить outbox после публикации
+            if outbox_files:
+                cleared = clear_outbox(self.agent.agent_dir)
+                logger.info(f"Outbox очищен: {cleared} файл(ов)")
 
         except asyncio.CancelledError:
             logger.info(f"Task cancelled for chat {chat_id}")
