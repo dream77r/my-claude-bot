@@ -75,6 +75,9 @@ BOT_COMMANDS = [
     BotCommand("clone_agent", "Клонировать агента"),
     BotCommand("stop_agent", "Остановить агента"),
     BotCommand("start_agent", "Запустить агента"),
+    BotCommand("skills", "Список скиллов агента"),
+    BotCommand("newskill", "Создать новый скилл"),
+    BotCommand("removeskill", "Удалить скилл"),
     BotCommand("restart", "Перезапустить платформу"),
 ]
 
@@ -471,6 +474,11 @@ class TelegramBridge:
         router.exact("/set_access", self._cmd_set_access)
         router.exact("/stop_agent", self._cmd_stop_agent)
         router.exact("/start_agent", self._cmd_start_agent)
+
+        # Skill Creator commands
+        router.exact("/skills", self._cmd_skills)
+        router.exact("/newskill", self._cmd_newskill)
+        router.exact("/removeskill", self._cmd_removeskill)
 
         return router
 
@@ -1658,6 +1666,181 @@ class TelegramBridge:
 
         ok, msg = await self.fleet_runtime.start_agent(name)
         await self._reply(update, context, msg)
+
+    # ── Skill Creator commands ──
+
+    async def _cmd_skills(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Показать список скиллов агента: /skills [agent_name]"""
+        from .skill_creator import list_skills, get_all_agent_dirs
+
+        target_name = args.strip() if args.strip() else self.agent.name
+
+        # Найти директорию целевого агента
+        if target_name == self.agent.name:
+            agent_dir = self.agent.agent_dir
+        elif self.fleet_runtime and target_name in self.fleet_runtime.agents:
+            agent_dir = self.fleet_runtime.agents[target_name].agent_dir
+        else:
+            # Попробовать найти по файловой системе
+            agents = get_all_agent_dirs(
+                str(Path(self.agent.agent_dir).parent.parent)
+            )
+            agent_dir = agents.get(target_name)
+
+        if not agent_dir:
+            await self._reply(
+                update, context,
+                f"Агент '{target_name}' не найден."
+            )
+            return
+
+        skills = list_skills(agent_dir)
+        if not skills:
+            await self._reply(
+                update, context,
+                f"У агента '{target_name}' нет скиллов.\n"
+                f"Создай: /newskill описание скилла"
+            )
+            return
+
+        lines = [f"Скиллы агента '{target_name}':"]
+        for s in skills:
+            always_tag = " [always]" if s["always"] else ""
+            lines.append(f"  - {s['name']}{always_tag}: {s['description']}")
+        lines.append(f"\nВсего: {len(skills)}")
+
+        await self._reply(update, context, "\n".join(lines))
+
+    async def _cmd_newskill(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Создать новый скилл: /newskill описание"""
+        # Только master может создавать скиллы
+        if not self.agent.is_master:
+            await self._reply(
+                update, context,
+                "Создание скиллов доступно только master-агенту."
+            )
+            return
+
+        description = args.strip()
+        if not description:
+            await self._reply(
+                update, context,
+                "Опиши скилл: /newskill <описание>\n\n"
+                "Примеры:\n"
+                "  /newskill анализ конкурентов — исследование и сравнение\n"
+                "  /newskill ежедневный отчёт по задачам команды\n"
+                "  /newskill генерация SQL запросов из текстового описания"
+            )
+            return
+
+        # Определить целевого агента
+        # Формат: /newskill @agent_name описание
+        # или просто /newskill описание (создаётся для текущего агента)
+        target_name = self.agent.name
+        target_dir = self.agent.agent_dir
+
+        if description.startswith("@"):
+            parts = description.split(maxsplit=1)
+            candidate = parts[0][1:]  # убрать @
+            if self.fleet_runtime and candidate in self.fleet_runtime.agents:
+                target_name = candidate
+                target_dir = self.fleet_runtime.agents[candidate].agent_dir
+                description = parts[1] if len(parts) > 1 else ""
+                if not description:
+                    await self._reply(
+                        update, context,
+                        f"Укажи описание скилла для @{target_name}:\n"
+                        f"/newskill @{target_name} <описание>"
+                    )
+                    return
+
+        from .skill_creator import create_skill
+
+        chat_id = update.effective_chat.id
+        status = StatusMessage(chat_id, context)
+        await status.show("Генерирую скилл...")
+
+        try:
+            # Определить роль целевого агента
+            if self.fleet_runtime and target_name in self.fleet_runtime.agents:
+                target_role = self.fleet_runtime.agents[target_name].role
+            else:
+                target_role = "worker"
+
+            ok, message = await create_skill(
+                user_request=description,
+                agent_dir=target_dir,
+                agent_name=target_name,
+                agent_role=target_role,
+                model="sonnet",
+            )
+
+            await status.cleanup()
+            await self._reply(update, context, message)
+
+        except Exception as e:
+            await status.cleanup()
+            logger.error(f"NewSkill command error: {e}")
+            await self._reply(
+                update, context,
+                f"Ошибка создания скилла: {e}"
+            )
+
+    async def _cmd_removeskill(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Удалить скилл: /removeskill skill_name [@agent_name]"""
+        if not self.agent.is_master:
+            await self._reply(
+                update, context,
+                "Удаление скиллов доступно только master-агенту."
+            )
+            return
+
+        parts = args.strip().split()
+        if not parts:
+            await self._reply(
+                update, context,
+                "Укажи имя скилла: /removeskill <skill_name> [@agent_name]\n"
+                "Список скиллов: /skills"
+            )
+            return
+
+        skill_name = parts[0]
+
+        # Определить целевого агента
+        target_dir = self.agent.agent_dir
+        target_name = self.agent.name
+        if len(parts) > 1 and parts[1].startswith("@"):
+            candidate = parts[1][1:]
+            if self.fleet_runtime and candidate in self.fleet_runtime.agents:
+                target_name = candidate
+                target_dir = self.fleet_runtime.agents[candidate].agent_dir
+            else:
+                await self._reply(
+                    update, context,
+                    f"Агент '{candidate}' не найден."
+                )
+                return
+
+        from .skill_creator import remove_skill
+
+        ok = remove_skill(skill_name, target_dir)
+        if ok:
+            await self._reply(
+                update, context,
+                f"Скилл '{skill_name}' удалён у агента '{target_name}'."
+            )
+        else:
+            await self._reply(
+                update, context,
+                f"Скилл '{skill_name}' не найден у агента '{target_name}'.\n"
+                f"Список: /skills {target_name}"
+            )
 
     # ── Message aggregation ──
 
