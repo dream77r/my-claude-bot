@@ -37,6 +37,7 @@ from .hooks import HookContext, HookRegistry
 from .i18n import t
 from .input_sanitizer import make_sanitizer_hook
 from .metrics import make_metrics_hook
+from .sandbox import make_sandbox_hook
 from .ssrf_protection import make_ssrf_hook
 from .tool_hints import format_tool_hint
 
@@ -99,6 +100,19 @@ class Agent:
             self.hooks.register_fn(
                 "on_tool_use", "ssrf_protection",
                 make_ssrf_hook(ssrf_whitelist or None)
+            )
+
+        # Sandbox — изоляция файловой системы для worker-агентов
+        sandbox_config = self.config.get("sandbox", {})
+        # По умолчанию: worker = sandbox ON, master = sandbox OFF
+        sandbox_default = not self.is_master
+        sandbox_enabled = sandbox_config.get("enabled", sandbox_default)
+        if sandbox_enabled:
+            sandbox_root = str(Path(self.agent_dir).resolve())
+            sandbox_extra = sandbox_config.get("allowed_paths", [])
+            self.hooks.register_fn(
+                "on_tool_use", "sandbox",
+                make_sandbox_hook(sandbox_root, sandbox_extra or None)
             )
 
         # Audit Logging — JSONL аудит-лог всех tool calls
@@ -583,14 +597,31 @@ class Agent:
 
         # Command Guard — PreToolUse хук для реальной блокировки
         guard_config = self.config.get("command_guard", {})
+        pre_tool_hooks = []
         if guard_config.get("enabled", True):
             guard_script = Path(__file__).parent / "command_guard.py"
-            cli_hooks["PreToolUse"] = [
-                {
-                    "type": "command",
-                    "command": f"{sys.executable} {guard_script}",
-                }
-            ]
+            pre_tool_hooks.append({
+                "type": "command",
+                "command": f"{sys.executable} {guard_script}",
+            })
+
+        # Sandbox — PreToolUse хук для изоляции worker-агентов
+        sandbox_config = self.config.get("sandbox", {})
+        sandbox_default = not self.is_master
+        if sandbox_config.get("enabled", sandbox_default):
+            sandbox_script = Path(__file__).parent / "sandbox.py"
+            sandbox_root = str(Path(self.agent_dir).resolve())
+            sandbox_extra = sandbox_config.get("allowed_paths", [])
+            sandbox_args = f'"{sandbox_root}"'
+            for p in sandbox_extra:
+                sandbox_args += f' "{p}"'
+            pre_tool_hooks.append({
+                "type": "command",
+                "command": f"{sys.executable} {sandbox_script} {sandbox_args}",
+            })
+
+        if pre_tool_hooks:
+            cli_hooks["PreToolUse"] = pre_tool_hooks
 
         # Собрать опции
         options = ClaudeAgentOptions(
