@@ -33,7 +33,7 @@ from telegram.ext import (
 
 from . import memory
 from .command_router import CommandRouter
-from .file_handler import download_file, send_file
+from .file_handler import clear_outbox, download_file, send_file
 from .i18n import t
 from .voice_handler import download_voice, get_deepgram_api_key, transcribe
 
@@ -1329,7 +1329,7 @@ class TelegramBridge:
             memory.log_message(self.agent.agent_dir, "assistant", response)
 
             # Проверить outbox файлы
-            from .file_handler import scan_outbox, clear_outbox
+            from .file_handler import scan_outbox
             outbox_files = scan_outbox(self.agent.agent_dir)
 
             # Финализация: edit на месте если корот��о и нет файлов
@@ -1866,6 +1866,10 @@ class TelegramBridge:
                         await self._send_outbox_files(
                             app, chat_id, msg.files, thread_id
                         )
+                        # Очистить outbox после успешной отправки
+                        agent_dir = msg.metadata.get("agent_dir")
+                        if agent_dir:
+                            clear_outbox(agent_dir)
 
                 elif event == "error":
                     status = self._status_messages.pop(chat_id, None)
