@@ -706,6 +706,14 @@ class TelegramBridge:
     async def _cmd_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
+        # Авто-регистрация: если user ID не в allowed_users — добавить
+        user = update.effective_user
+        if user and self.agent.allowed_users:
+            if user.id not in self.agent.allowed_users:
+                self.agent.allowed_users.append(user.id)
+                # Сохранить в agent.yaml
+                self._save_allowed_users(user.id, user.first_name or "")
+
         # Проверить нужен ли онбординг (проверяем profile.md каждый раз)
         if memory.is_onboarding_needed(self.agent.agent_dir):
             # Если язык ещё не выбран — сначала спрашиваем язык
@@ -1166,9 +1174,9 @@ class TelegramBridge:
                         user_ids.append(int(part))
 
                 # Проверить forwarded message
-                fwd = getattr(update.message, "forward_from", None)
-                if fwd:
-                    user_ids.append(fwd.id)
+                fwd_origin = getattr(update.message, "forward_origin", None)
+                if fwd_origin and getattr(fwd_origin, "type", "") == "user":
+                    user_ids.append(fwd_origin.sender_user.id)
 
             data["allowed_users"] = user_ids
 
@@ -1240,17 +1248,58 @@ class TelegramBridge:
         # Hot-reload
         ok, msg = await self.fleet_runtime.start_agent(data["name"])
         if ok:
-            await self._reply(
-                update, context,
-                f"Готово! Агент '{data['display_name']}' запущен.\n"
-                f"Найди его в Telegram и напиши /start."
+            # Получить ссылку на нового бота
+            invite_link = await self._get_bot_invite_link(data["token"])
+            reply = (
+                f"Готово! Агент '{data['display_name']}' запущен.\n\n"
+                f"Ссылка для клиента:\n{invite_link}\n\n"
+                f"Клиент нажмёт Start — и бот автоматически запомнит его ID."
             )
+            await self._reply(update, context, reply)
         else:
             await self._reply(
                 update, context,
                 f"Агент создан, но не запустился: {msg}\n"
                 "Попробуй /start_agent " + data["name"]
             )
+
+    def _save_allowed_users(self, new_user_id: int, user_name: str) -> None:
+        """Добавить user ID в agent.yaml (persist)."""
+        try:
+            import yaml as _yaml
+            yaml_path = Path(self.agent.config_path)
+            with open(yaml_path, encoding="utf-8") as f:
+                config = _yaml.safe_load(f.read())
+            users = config.get("allowed_users", [])
+            if isinstance(users, list) and new_user_id not in users:
+                users.append(new_user_id)
+                config["allowed_users"] = users
+                with open(yaml_path, "w", encoding="utf-8") as f:
+                    _yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+                logger.info(
+                    f"Auto-registered user {new_user_id} ({user_name}) "
+                    f"for agent '{self.agent.name}'"
+                )
+        except Exception as e:
+            logger.error(f"Failed to save allowed_users: {e}")
+
+    async def _get_bot_invite_link(self, bot_token: str) -> str:
+        """Получить invite link для бота по токену."""
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"https://api.telegram.org/bot{bot_token}/getMe",
+                    timeout=10,
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    username = data["result"].get("username", "")
+                    if username:
+                        return f"https://t.me/{username}"
+        except Exception:
+            pass
+        return "(не удалось получить ссылку — найди бота в Telegram вручную)"
 
     async def _cmd_clone_agent(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
@@ -1357,9 +1406,9 @@ class TelegramBridge:
                 for part in text.replace(",", " ").split():
                     if part.strip().isdigit():
                         user_ids.append(int(part.strip()))
-                fwd = getattr(update.message, "forward_from", None)
-                if fwd:
-                    user_ids.append(fwd.id)
+                fwd_origin = getattr(update.message, "forward_origin", None)
+                if fwd_origin and getattr(fwd_origin, "type", "") == "user":
+                    user_ids.append(fwd_origin.sender_user.id)
 
             data["allowed_users"] = user_ids
             self._wizard_state.pop(chat_id, None)
@@ -1385,10 +1434,12 @@ class TelegramBridge:
 
             ok, msg = await self.fleet_runtime.start_agent(data["name"])
             if ok:
+                invite_link = await self._get_bot_invite_link(data["token"])
                 await self._reply(
                     update, context,
-                    f"Готово! '{data['display_name']}' запущен.\n"
-                    f"Найди в Telegram и напиши /start."
+                    f"Готово! '{data['display_name']}' запущен.\n\n"
+                    f"Ссылка для клиента:\n{invite_link}\n\n"
+                    f"Клиент нажмёт Start — бот запомнит его ID."
                 )
             else:
                 await self._reply(
@@ -1445,10 +1496,11 @@ class TelegramBridge:
         # Только показать текущий доступ
         if len(parts) == 1:
             # Проверить forwarded message
-            fwd = getattr(update.message, "forward_from", None)
-            if fwd:
+            fwd_origin = getattr(update.message, "forward_origin", None)
+            if fwd_origin and getattr(fwd_origin, "type", "") == "user":
                 # Добавить ID из пересланного сообщения
-                new_id = fwd.id
+                fwd_user = fwd_origin.sender_user
+                new_id = fwd_user.id
                 if current_users and new_id not in current_users:
                     current_users.append(new_id)
                     config["allowed_users"] = current_users
@@ -1456,7 +1508,7 @@ class TelegramBridge:
                         _yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
                     await self._reply(
                         update, context,
-                        f"Добавлен доступ: {new_id} ({fwd.first_name or ''}) → '{agent_name}'\n"
+                        f"Добавлен доступ: {new_id} ({fwd_user.first_name or ''}) → '{agent_name}'\n"
                         f"Перезапусти агента: /stop_agent {agent_name} → /start_agent {agent_name}"
                     )
                     return
