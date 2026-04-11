@@ -21,6 +21,7 @@ from .agent_manager import AgentManager
 from .agent_worker import AgentWorker
 from .bus import FleetBus
 from .cron import cron_loop
+from .delegation import DelegationManager
 from .dream import dream_loop
 from .heartbeat import heartbeat_loop
 from .orchestrator import Orchestrator
@@ -176,6 +177,12 @@ class FleetRuntime:
         bot_task = asyncio.create_task(run_bot(bridge))
 
         agent_tasks = [worker_task, bot_task]
+
+        # Delegation (только для master)
+        if agent.is_master:
+            delegation = DelegationManager(agent.name, agent.agent_dir, self.bus)
+            delegation_task = asyncio.create_task(delegation.watch())
+            agent_tasks.append(delegation_task)
 
         # Dream
         dream_config = agent.config.get("dream", {})
@@ -352,6 +359,17 @@ async def async_main() -> None:
         # Регистрация в runtime (worker + bot tasks)
         runtime.register_running(agent, worker, bridge, [worker_task, bot_task])
         logger.info(f"Бот '{agent.name}' добавлен в очередь запуска")
+
+    # ── Delegation Managers (только для master-агентов) ──
+    for agent in agents:
+        if not agent.is_master:
+            continue
+        delegation = DelegationManager(agent.name, agent.agent_dir, bus)
+        delegation_task = asyncio.create_task(delegation.watch())
+        if agent.name in runtime.tasks:
+            runtime.tasks[agent.name].append(delegation_task)
+        tasks.append(delegation_task)
+        logger.info(f"DelegationManager запущен для master '{agent.name}'")
 
     # ── Dream Memory ──
     for agent in agents:

@@ -1,5 +1,6 @@
 name: "me"
 display_name: "Стратегический советник"
+role: "master"
 bot_token: "${ME_BOT_TOKEN}"
 system_prompt: |
   Ты — персональный стратегический советник фаундера.

@@ -48,6 +48,7 @@ class Agent:
 
         self.name: str = self.config["name"]
         self.display_name: str = self.config.get("display_name", self.name)
+        self.role: str = self.config.get("role", "worker")
         self.bot_token: str = self.config["bot_token"]
         self.system_prompt_template: str = self.config.get("system_prompt", "")
         self.memory_path: str = self.config.get("memory_path", f"./agents/{self.name}/memory/")
@@ -88,6 +89,11 @@ class Agent:
             except (ValueError, TypeError):
                 logger.warning(f"Невалидный user ID: {u}")
         return result
+
+    @property
+    def is_master(self) -> bool:
+        """Является ли агент мастером (оркестратором) флота."""
+        return self.role == "master"
 
     def is_user_allowed(self, user_id: int) -> bool:
         """Проверить, имеет ли пользователь доступ."""
@@ -179,6 +185,118 @@ class Agent:
             return soul_path.read_text(encoding="utf-8")
         return ""
 
+    def _build_fleet_context(self) -> str:
+        """
+        Описать подчинённых агентов для делегации.
+
+        Только для master-агента. Включает:
+        - Список доступных worker-ов с описанием
+        - Инструкцию по делегации через файлы
+        - Пути к данным worker-ов (чтение/настройки)
+        """
+        if not self.is_master:
+            return ""
+
+        agents_dir = Path(self.agent_dir).parent
+        fleet_info = []
+        worker_paths = []
+
+        for agent_yaml in sorted(agents_dir.glob("*/agent.yaml")):
+            if agent_yaml.parent.name == self.name:
+                continue
+            try:
+                with open(agent_yaml, encoding="utf-8") as f:
+                    raw = f.read()
+                # БЕЗ expandvars — не раскрывать секреты
+                config = yaml.safe_load(raw)
+                name = config.get("name", "")
+                display = config.get("display_name", name)
+                desc = config.get("system_prompt", "")[:200].strip()
+                fleet_info.append(f"- **{name}** ({display}): {desc}")
+
+                # Пути к данным worker-а
+                worker_dir = str(agent_yaml.parent.resolve())
+                worker_paths.append(
+                    f"- **{name}**: память `{worker_dir}/memory/`, "
+                    f"конфиг `{worker_dir}/agent.yaml`"
+                )
+            except Exception:
+                continue
+
+        if not fleet_info:
+            return ""
+
+        delegation_dir = Path(self.agent_dir) / "memory" / "delegation"
+
+        parts = [
+            "## Управление командой агентов\n",
+            "Ты — главный агент (master). У тебя есть подчинённые агенты, "
+            "которым ты можешь давать задания.\n",
+            "### Подчинённые агенты:\n" + "\n".join(fleet_info) + "\n",
+            "### Делегация задач:\n"
+            f"1. Запиши задачу: `Write` → `{delegation_dir}/{{agent_name}}.task.md`\n"
+            "2. Подожди ~10-15 секунд\n"
+            f"3. Прочитай ответ: `Read` → `{delegation_dir}/{{agent_name}}.result.md`\n",
+            "Формат файла задачи:\n"
+            "```\n"
+            "Описание задачи для агента...\n"
+            "```\n",
+            "### Доступ к данным агентов:\n"
+            "Ты можешь читать и изменять данные любого подчинённого агента:\n"
+            + "\n".join(worker_paths) + "\n",
+            "Ты можешь:\n"
+            "- Читать wiki, daily notes, profile любого агента\n"
+            "- Изменять настройки агентов (agent.yaml)\n"
+            "- Читать и редактировать их скиллы\n"
+            "- Смотреть логи их работы\n",
+            "Используй делегацию когда задача лучше подходит другому агенту "
+            "(код — кодеру, командные задачи — team). "
+            "Если нужен только доступ к данным — читай напрямую.\n",
+        ]
+
+        return "\n".join(parts)
+
+    def _build_worker_isolation(self) -> str:
+        """
+        Инструкции изоляции для worker-агентов.
+
+        Worker не должен:
+        - Делегировать задачи другим агентам
+        - Читать/изменять данные master-агента
+        - Изменять свой agent.yaml
+        """
+        if self.is_master:
+            return ""
+
+        agents_dir = Path(self.agent_dir).parent
+        master_name = None
+        for agent_yaml in agents_dir.glob("*/agent.yaml"):
+            try:
+                with open(agent_yaml, encoding="utf-8") as f:
+                    config = yaml.safe_load(f.read())
+                if config.get("role") == "master":
+                    master_name = config.get("name", agent_yaml.parent.name)
+                    break
+            except Exception:
+                continue
+
+        parts = [
+            "## Режим работы\n",
+            "Ты — подчинённый агент (worker). Ты получаешь задачи от "
+            f"главного агента{f' ({master_name})' if master_name else ''} "
+            "или напрямую от пользователя.\n",
+            "### Ограничения:\n"
+            "- Ты НЕ можешь давать задания другим агентам\n"
+            "- Ты НЕ можешь читать или изменять данные других агентов\n"
+            "- Ты НЕ можешь изменять свой agent.yaml\n"
+            "- Работай только в своей директории памяти\n",
+            "Если тебе нужна информация от другого агента или действие "
+            "за пределами твоих полномочий — сообщи об этом в ответе, "
+            "и главный агент решит что делать.\n",
+        ]
+
+        return "\n".join(parts)
+
     def build_system_prompt(self) -> str:
         """
         Собрать полный system prompt:
@@ -205,7 +323,15 @@ class Agent:
         if ctx:
             parts.append("## Контекст из памяти\n\n" + ctx)
 
-        # 5. Языковая инструкция
+        # 5. Контекст флота (master) или изоляция (worker)
+        fleet = self._build_fleet_context()
+        if fleet:
+            parts.append(fleet)
+        isolation = self._build_worker_isolation()
+        if isolation:
+            parts.append(isolation)
+
+        # 6. Языковая инструкция
         lang = memory.get_setting(self.agent_dir, "language")
         if lang:
             parts.append(t("system_lang_instruction", lang))

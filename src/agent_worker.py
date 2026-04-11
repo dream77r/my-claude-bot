@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .bus import FleetBus, FleetMessage, MessageType
+from .delegation import DELEGATION_TIMEOUT
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -70,6 +71,11 @@ class AgentWorker:
 
     async def _handle_message(self, msg: FleetMessage) -> None:
         """Обработать одно входящее сообщение."""
+        # Делегированное сообщение от другого агента — обработать и ответить
+        if msg.msg_type == MessageType.AGENT_TO_AGENT:
+            await self._handle_delegation(msg)
+            return
+
         chat_id = msg.chat_id
         # Пробросить thread_id через все ответные сообщения
         thread_id = msg.metadata.get("message_thread_id")
@@ -151,6 +157,94 @@ class AgentWorker:
             ))
         finally:
             self._active_tasks.pop(chat_id, None)
+
+    async def _handle_delegation(self, msg: FleetMessage) -> None:
+        """Обработать делегированное сообщение от другого агента."""
+        reply_to = msg.metadata.get("reply_to")
+        source_agent = msg.metadata.get("source_agent", msg.source)
+        source_role = msg.metadata.get("source_role", "")
+
+        # Worker принимает задачи только от master
+        if source_role != "master":
+            logger.warning(
+                f"Делегация отклонена: '{source_agent}' (role={source_role}) "
+                f"→ '{self.agent.name}'. Только master может делегировать."
+            )
+            if reply_to:
+                await self.bus.publish(FleetMessage(
+                    source=f"agent:{self.agent.name}",
+                    target=reply_to,
+                    content=(
+                        f"⚠️ Делегация отклонена. Агент '{source_agent}' "
+                        f"не имеет прав делегировать задачи. "
+                        f"Только master-агент может давать задания."
+                    ),
+                    msg_type=MessageType.AGENT_TO_AGENT,
+                    metadata={
+                        "delegation_id": msg.metadata.get("delegation_id", ""),
+                    },
+                ))
+            return
+
+        # Защита от рекурсивной делегации (A → B → A)
+        delegation_chain = msg.metadata.get("delegation_chain", [])
+        if self.agent.name in delegation_chain:
+            logger.warning(
+                f"Рекурсивная делегация заблокирована: "
+                f"{' → '.join(delegation_chain)} → {self.agent.name}"
+            )
+            if reply_to:
+                await self.bus.publish(FleetMessage(
+                    source=f"agent:{self.agent.name}",
+                    target=reply_to,
+                    content=(
+                        f"⚠️ Рекурсивная делегация заблокирована. "
+                        f"Цепочка: {' → '.join(delegation_chain)} → "
+                        f"{self.agent.name}. Реши задачу самостоятельно."
+                    ),
+                    msg_type=MessageType.AGENT_TO_AGENT,
+                    metadata={
+                        "delegation_id": msg.metadata.get("delegation_id", ""),
+                    },
+                ))
+            return
+
+        logger.info(
+            f"AgentWorker '{self.agent.name}' получил делегацию "
+            f"от '{source_agent}'"
+        )
+
+        try:
+            async with self.semaphore:
+                response = await asyncio.wait_for(
+                    self.agent.call_claude(msg.content),
+                    timeout=DELEGATION_TIMEOUT,
+                )
+        except asyncio.TimeoutError:
+            response = "Таймаут обработки делегированной задачи."
+            logger.warning(
+                f"Делегация таймаут: '{self.agent.name}' не успел ответить"
+            )
+        except Exception as e:
+            response = f"Ошибка обработки: {e}"
+            logger.error(f"Делегация ошибка в '{self.agent.name}': {e}")
+
+        # Отправить ответ обратно через reply_to очередь
+        if reply_to:
+            await self.bus.publish(FleetMessage(
+                source=f"agent:{self.agent.name}",
+                target=reply_to,
+                content=response,
+                msg_type=MessageType.AGENT_TO_AGENT,
+                metadata={
+                    "delegation_id": msg.metadata.get("delegation_id", ""),
+                    "source_agent": self.agent.name,
+                },
+            ))
+            logger.info(
+                f"Делегация ответ отправлен: '{self.agent.name}' → "
+                f"'{source_agent}'"
+            )
 
     def stop(self) -> None:
         """Остановить воркер."""

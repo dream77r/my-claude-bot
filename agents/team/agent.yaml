@@ -1,5 +1,6 @@
 name: "team"
 display_name: "Team Hub"
+role: "worker"
 bot_token: "${TEAM_BOT_TOKEN}"
 system_prompt: |
   Ты — командный ассистент Team Hub. Работаешь в групповом чате команды.

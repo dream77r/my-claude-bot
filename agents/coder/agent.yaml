@@ -1,5 +1,6 @@
 name: "coder"
 display_name: "Кодер"
+role: "worker"
 bot_token: "${CODER_BOT_TOKEN}"
 system_prompt: |
   Ты — технический AI-агент. Пишешь код, дебажишь, помогаешь с DevOps.
