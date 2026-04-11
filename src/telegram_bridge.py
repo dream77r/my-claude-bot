@@ -816,7 +816,6 @@ class TelegramBridge:
                 onboarding_prompt,
                 None,
                 self.semaphore,
-                on_tool_use=lambda hint: status.show(f"⏳ {hint}"),
             )
             memory.log_message(self.agent.agent_dir, "assistant", response)
             await status.cleanup()
@@ -1942,20 +1941,22 @@ class TelegramBridge:
         status = StatusMessage(chat_id, context, thread_id)
         await status.show("Думаю...")
         status.start_typing()
+        status.start_thinking_timer()
 
         task = asyncio.current_task()
         self._active_tasks[chat_id] = task
+
+        async def _on_text_delta(text: str) -> None:
+            status.stop_thinking_timer()
+            preview = text[:TG_MESSAGE_LIMIT - 20] + ("\n..." if len(text) > TG_MESSAGE_LIMIT - 20 else "")
+            await status.show(preview, streaming=True)
 
         try:
             response = await self.agent.call_claude(
                 combined,
                 files or None,
                 self.semaphore,
-                on_tool_use=lambda hint: status.show(f"⏳ {hint}"),
-                on_text_delta=lambda text: status.show(
-                    text[:TG_MESSAGE_LIMIT - 20] + ("\n..." if len(text) > TG_MESSAGE_LIMIT - 20 else ""),
-                    streaming=True,
-                ),
+                on_text_delta=_on_text_delta,
                 group_chat_id=chat_id if is_group else None,
             )
 
