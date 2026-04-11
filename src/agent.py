@@ -759,6 +759,6 @@ class Agent:
 
         if sem:
             async with sem:
-                return await asyncio.wait_for(_do_query(), timeout=180)
+                return await asyncio.wait_for(_do_query(), timeout=600)
         else:
-            return await asyncio.wait_for(_do_query(), timeout=180)
+            return await asyncio.wait_for(_do_query(), timeout=600)
