@@ -180,8 +180,8 @@ echo -e "${BOLD}Restarting service...${RESET}"
 
 RESTARTED=0
 
-# Systemd
-if systemctl --user is-active my-claude-bot &>/dev/null 2>&1; then
+# Systemd (is-enabled проверяет что сервис настроен, даже если сейчас не запущен)
+if systemctl --user is-enabled my-claude-bot &>/dev/null 2>&1; then
     systemctl --user restart my-claude-bot
     sleep 3
     if systemctl --user is-active my-claude-bot &>/dev/null; then
