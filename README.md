@@ -42,7 +42,7 @@ Open Telegram and message your bot — it handles everything else (onboarding, l
 ## Updating
 
 ```bash
-git pull && ./update.sh
+cd ~/my-claude-bot && git pull && ./update.sh
 ```
 
 One command: pulls the latest code, updates dependencies if needed, and restarts the service. Your data is safe -- `.env`, agent memory, `SOUL.md`, and settings are never touched.
