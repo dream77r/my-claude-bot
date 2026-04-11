@@ -706,12 +706,22 @@ class TelegramBridge:
     async def _cmd_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
-        # Авто-регистрация: если user ID не в allowed_users — добавить
+        # Авто-регистрация: первый клиент получает доступ, остальным — отказ
         user = update.effective_user
         if user and self.agent.allowed_users:
             if user.id not in self.agent.allowed_users:
+                # Проверить есть ли уже клиент (не-FOUNDER)
+                import os
+                founder_id = int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+                clients = [uid for uid in self.agent.allowed_users if uid != founder_id]
+                if clients:
+                    # Уже есть клиент — отказать
+                    await update.message.reply_text(
+                        "Этот бот уже привязан к другому пользователю."
+                    )
+                    return
+                # Первый клиент — добавить
                 self.agent.allowed_users.append(user.id)
-                # Сохранить в agent.yaml
                 self._save_allowed_users(user.id, user.first_name or "")
 
         # Проверить нужен ли онбординг (проверяем profile.md каждый раз)
