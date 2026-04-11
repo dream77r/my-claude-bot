@@ -27,9 +27,17 @@ Multi-agent Telegram platform powered by Claude Agent SDK. A fleet of AI agents 
 git clone https://github.com/dream77r/my-claude-bot.git && cd my-claude-bot && ./setup.sh
 ```
 
-That's it. The script checks Docker and Claude CLI, asks for your bot token and Telegram ID, then builds and starts everything. Open Telegram and message your bot — it will guide you through onboarding.
+The script will:
+1. Check dependencies (Python, Claude CLI)
+2. Ask for your bot token (with instructions to get one from @BotFather)
+3. Ask for your Telegram ID (with instructions to get it from @userinfobot)
+4. Ask for resource limits (memory, CPU) based on your server
+5. Install packages, create `.env`, set up auto-restart service
+6. Start the bot
 
-**Prerequisites:** Claude CLI (installed and authorized), Claude Pro subscription, Python 3.10+.
+Open Telegram and message your bot — it handles everything else (onboarding, language, settings).
+
+**Prerequisites:** Python 3.10+, Claude CLI (installed and authorized), Claude Pro subscription.
 
 ## Running with systemd (recommended)
 
