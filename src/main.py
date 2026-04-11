@@ -303,6 +303,10 @@ async def run_bot(bridge: TelegramBridge) -> None:
     bus_listener_task = None
     try:
         await app.initialize()
+        # post_init не вызывается автоматически при ручном initialize(),
+        # поэтому вызываем явно (регистрация команд + git init)
+        if app.post_init:
+            await app.post_init(app)
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
         logger.info(f"Бот '{bridge.agent.name}' запущен")
