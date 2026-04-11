@@ -29,9 +29,39 @@ git clone https://github.com/dream77r/my-claude-bot.git && cd my-claude-bot && .
 
 That's it. The script checks Docker and Claude CLI, asks for your bot token and Telegram ID, then builds and starts everything. Open Telegram and message your bot — it will guide you through onboarding.
 
-**Prerequisites:** Docker, Claude CLI (installed and authorized), Claude Pro subscription.
+**Prerequisites:** Claude CLI (installed and authorized), Claude Pro subscription, Python 3.10+.
 
-## Manual Docker setup
+## Running with systemd (recommended)
+
+```bash
+cp .env.example .env
+# fill in .env: bot token, Telegram ID
+
+# Create a user-level systemd service
+mkdir -p ~/.config/systemd/user
+cp my-claude-bot.service ~/.config/systemd/user/
+# Edit the service file: set WorkingDirectory and Environment paths
+
+systemctl --user daemon-reload
+systemctl --user enable my-claude-bot   # autostart on boot
+systemctl --user start my-claude-bot    # start now
+sudo loginctl enable-linger $USER       # keep running after logout
+```
+
+The bot automatically:
+- restarts on crash (5 sec delay)
+- starts on server reboot
+- is limited by memory (1 GB) and CPU (2 cores)
+- sends a Telegram notification on every (re)start
+
+**Useful commands:**
+```bash
+systemctl --user status my-claude-bot    # status
+journalctl --user -u my-claude-bot -f    # real-time logs
+systemctl --user restart my-claude-bot   # manual restart
+```
+
+## Running with Docker (alternative)
 
 ```bash
 cp .env.example .env
@@ -40,10 +70,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-The bot automatically:
-- restarts on crash
-- starts on server reboot
-- is limited by memory (1GB) and CPU (2 cores)
+Note: Claude CLI must be accessible inside the container (mounted via volumes in `docker-compose.yml`).
 
 ## Voice Messages
 
@@ -211,6 +238,7 @@ agents/team/                  -- team assistant (group chat)
 | `/create_agent` | Create a new agent via interactive wizard |
 | `/start_agent` | Start an agent by name |
 | `/stop_agent` | Stop an agent by name |
+| `/restart` | Restart the platform (applies code updates) |
 
 ## Agent Config (agent.yaml)
 
@@ -292,25 +320,25 @@ python -m src.cli validate        # check configs
 
 Each agent is a separate Telegram bot with isolated memory. The Orchestrator automatically routes messages through the MessageBus.
 
-## Docker Commands
-
-```bash
-docker compose ps          # status
-docker compose logs -f     # real-time logs
-docker compose restart     # restart
-docker compose down        # stop
-docker compose up -d --build  # rebuild and start
-```
-
 ## Security
 
-- Tokens stored in `.env` (not tracked by git)
+- Tokens stored in `.env` (not tracked by git, file permissions 600)
 - Bot access restricted to specified Telegram IDs (`allowed_users`)
 - Claude CLI runs with a limited set of tools (`allowedTools`)
-- Docker container isolated from the host system
 - Each agent's memory is isolated (its own `memory/`)
 - Git-versioned memory with rollback capability (`/restore`)
 - Group chats: owner's personal data never exposed in group system prompts
+- Resource limits: memory (1 GB), CPU (2 cores), max processes (100)
+- Restart notification via Telegram on every service (re)start
+- Claude CLI path auto-detected via `PATH` or `CLAUDE_CLI_PATH` env var
+
+## Multi-user setup
+
+Multiple users can run their own bot instances on the same server:
+- Each user creates their own bot via @BotFather (unique token)
+- Each user has their own `.env`, `agents/`, and systemd service
+- User-level systemd services are fully isolated
+- No conflicts as long as bot tokens are different
 
 ## Roadmap
 

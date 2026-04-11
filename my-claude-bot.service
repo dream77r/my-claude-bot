@@ -1,0 +1,32 @@
+# Systemd user service for My Claude Bot
+# Copy to: ~/.config/systemd/user/my-claude-bot.service
+# Then: systemctl --user daemon-reload && systemctl --user enable --now my-claude-bot
+# Logs: journalctl --user -u my-claude-bot -f
+
+[Unit]
+Description=My Claude Bot — Telegram multi-agent platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EDIT: set your project path
+WorkingDirectory=%h/my-claude-bot
+ExecStart=/usr/bin/python3 -m src.main
+Restart=always
+RestartSec=5
+
+# EDIT: set your home directory for Claude CLI
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Resource limits
+MemoryMax=1G
+MemoryHigh=800M
+CPUQuota=200%
+TasksMax=100
+
+# Optional: notification on (re)start
+# ExecStartPost=%h/my-claude-bot/scripts/notify-restart.sh
+
+[Install]
+WantedBy=default.target

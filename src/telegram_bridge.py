@@ -760,10 +760,9 @@ class TelegramBridge:
             update, context,
             "Перезапускаюсь... Буду доступен через 5-10 секунд."
         )
-        # Даём Telegram время отправить сообщение
         await asyncio.sleep(1)
         logger.info("Restart requested via Telegram")
-        # sys.exit(0) → systemd видит что процесс завершился → перезапускает
+        # sys.exit(0) → systemd (user) видит что процесс завершился → перезапускает
         sys.exit(0)
 
     async def _cmd_status(

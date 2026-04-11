@@ -29,9 +29,39 @@ git clone https://github.com/dream77r/my-claude-bot.git && cd my-claude-bot && .
 
 Одна команда. Скрипт проверит Docker и Claude CLI, спросит токен бота и Telegram ID, соберёт и запустит всё. Открой Telegram и напиши боту — он проведёт онбординг.
 
-**Требования:** Docker, Claude CLI (установлен и авторизован), Claude Pro подписка.
+**Требования:** Claude CLI (установлен и авторизован), Claude Pro подписка, Python 3.10+.
 
-## Ручная настройка Docker
+## Запуск через systemd (рекомендуется)
+
+```bash
+cp .env.example .env
+# заполни .env: токен бота, Telegram ID
+
+# Создать пользовательский systemd-сервис
+mkdir -p ~/.config/systemd/user
+cp my-claude-bot.service ~/.config/systemd/user/
+# Отредактируй сервис: укажи пути WorkingDirectory и Environment
+
+systemctl --user daemon-reload
+systemctl --user enable my-claude-bot   # автозапуск при перезагрузке
+systemctl --user start my-claude-bot    # запустить сейчас
+sudo loginctl enable-linger $USER       # работать после выхода из SSH
+```
+
+Бот автоматически:
+- перезапускается при падении (через 5 сек)
+- стартует при перезагрузке сервера
+- ограничен по памяти (1 GB) и CPU (2 ядра)
+- отправляет уведомление в Telegram при каждом (пере)запуске
+
+**Полезные команды:**
+```bash
+systemctl --user status my-claude-bot    # статус
+journalctl --user -u my-claude-bot -f    # логи в реальном времени
+systemctl --user restart my-claude-bot   # ручной перезапуск
+```
+
+## Запуск через Docker (альтернатива)
 
 ```bash
 cp .env.example .env
@@ -40,10 +70,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Бот автоматически:
-- перезапускается при падении
-- стартует при перезагрузке сервера
-- ограничен по памяти (1GB) и CPU (2 ядра)
+Важно: Claude CLI должен быть доступен внутри контейнера (монтируется через volumes в `docker-compose.yml`).
 
 ## Голосовые сообщения
 
@@ -211,6 +238,7 @@ agents/team/                  -- командный ассистент (груп
 | `/create_agent` | Создать нового агента через визард |
 | `/start_agent` | Запустить агента по имени |
 | `/stop_agent` | Остановить агента по имени |
+| `/restart` | Перезапустить платформу (применяет обновления кода) |
 
 ## Конфиг агента (agent.yaml)
 
@@ -292,25 +320,25 @@ python -m src.cli validate        # проверка конфигов
 
 Каждый агент -- отдельный Telegram-бот с изолированной памятью. Orchestrator автоматически маршрутизирует сообщения через MessageBus.
 
-## Docker-команды
-
-```bash
-docker compose ps          # статус
-docker compose logs -f     # логи в реальном времени
-docker compose restart     # перезапуск
-docker compose down        # остановка
-docker compose up -d --build  # пересобрать и запустить
-```
-
 ## Безопасность
 
-- Токены хранятся в `.env` (не попадает в git)
+- Токены хранятся в `.env` (не попадает в git, права файла 600)
 - Доступ к боту только для указанных Telegram ID (`allowed_users`)
 - Claude CLI работает с ограниченным набором инструментов (`allowedTools`)
-- Docker-контейнер изолирован от основной системы
 - Память каждого агента изолирована (свой `memory/`)
 - Git-версионирование памяти с возможностью отката (`/restore`)
 - Групповые чаты: личные данные владельца никогда не попадают в system prompt группы
+- Ограничения ресурсов: память (1 GB), CPU (2 ядра), макс процессов (100)
+- Уведомление в Telegram при каждом (пере)запуске
+- Путь к Claude CLI определяется автоматически через `PATH` или переменную `CLAUDE_CLI_PATH`
+
+## Мультипользовательский режим
+
+На одном сервере можно запустить несколько независимых ботов:
+- Каждый пользователь создаёт своего бота у @BotFather (уникальный токен)
+- Каждый пользователь имеет свой `.env`, `agents/` и systemd-сервис
+- Пользовательские systemd-сервисы полностью изолированы
+- Конфликтов нет, пока токены ботов разные
 
 ## Roadmap
 
