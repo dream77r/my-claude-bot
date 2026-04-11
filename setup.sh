@@ -175,18 +175,14 @@ echo -e "${BOLD}Installing Python packages...${RESET}"
 python3 -m pip install --user -q claude-agent-sdk python-telegram-bot python-dotenv pyyaml httpx 2>&1 | tail -3
 echo -e "${GREEN}  ✓ Python packages installed${RESET}"
 
-# qmd — семантический поиск по wiki (требует Node.js)
-if command -v node &>/dev/null && command -v npm &>/dev/null; then
-    echo -e "${BOLD}Installing qmd (semantic search for wiki)...${RESET}"
-    npm install -g @tobilu/qmd --prefix ~/.local 2>&1 | tail -3
-    if [ -x "$HOME/.local/bin/qmd" ]; then
-        echo -e "${GREEN}  ✓ qmd installed (semantic wiki search)${RESET}"
-    else
-        echo -e "${YELLOW}  ⚠ qmd install failed — wiki search will use keyword fallback${RESET}"
-    fi
-else
-    echo -e "${YELLOW}  ⚠ Node.js not found — skipping qmd (semantic search)${RESET}"
-    echo "    Optional: sudo apt install nodejs npm && npm install -g @tobilu/qmd --prefix ~/.local"
+# Очистка qmd от предыдущих версий (если был установлен)
+if [ -e "$HOME/.local/bin/qmd" ] || [ -d "$HOME/.cache/qmd" ]; then
+    echo -e "${BOLD}Cleaning up qmd (replaced by built-in wiki search)...${RESET}"
+    rm -f "$HOME/.local/bin/qmd"
+    rm -rf "$HOME/.local/lib/node_modules/@tobilu/qmd"
+    rm -rf "$HOME/.cache/qmd"
+    rmdir "$HOME/.local/lib/node_modules/@tobilu" 2>/dev/null || true
+    echo -e "${GREEN}  ✓ qmd removed (wiki search is now built-in, no extra deps)${RESET}"
 fi
 
 # ══════════════════════════════════════════
@@ -249,19 +245,6 @@ systemctl --user enable my-claude-bot
 systemctl --user start my-claude-bot
 
 echo -e "${GREEN}  ✓ Service started${RESET}"
-
-# Initialize qmd collection for wiki (if qmd installed)
-if [ -x "$HOME/.local/bin/qmd" ]; then
-    echo -e "${BOLD}Initializing semantic search index...${RESET}"
-    MEMORY_DIR="${PROJECT_DIR}/agents/me/memory"
-    if [ -d "$MEMORY_DIR" ]; then
-        cd "$MEMORY_DIR"
-        "$HOME/.local/bin/qmd" collection add . --name me-wiki 2>/dev/null && \
-            echo -e "${GREEN}  ✓ Wiki indexed for semantic search${RESET}" || \
-            echo -e "${YELLOW}  ⚠ Wiki index failed (will retry on first search)${RESET}"
-        cd "$PROJECT_DIR"
-    fi
-fi
 
 # Wait for startup
 sleep 3

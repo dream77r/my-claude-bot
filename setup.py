@@ -63,32 +63,6 @@ def check_dependencies():
         return True
 
 
-def install_qmd():
-    """Установить qmd для семантического поиска по wiki (опционально)."""
-    qmd_path = Path.home() / ".local" / "bin" / "qmd"
-    if qmd_path.exists():
-        print(green("  qmd уже установлен (семантический поиск)"))
-        return True
-
-    # Проверить Node.js
-    result = subprocess.run(["which", "npm"], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(yellow("  Node.js не найден — семантический поиск недоступен"))
-        print("  Установи: sudo apt install nodejs npm")
-        return False
-
-    print(yellow("  Устанавливаю qmd (семантический поиск по wiki)..."))
-    result = subprocess.run(
-        ["npm", "install", "-g", "@tobilu/qmd", "--prefix", str(Path.home() / ".local")],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0 and qmd_path.exists():
-        print(green("  qmd установлен"))
-        return True
-    else:
-        print(yellow("  qmd не установился — будет keyword-поиск"))
-        return False
-
 
 def check_claude_cli():
     """Проверить что Claude CLI доступен."""
@@ -200,7 +174,7 @@ def main():
         sys.exit(1)
     if not check_dependencies():
         sys.exit(1)
-    install_qmd()
+
 
     # Если .env уже есть — спросить перезаписать
     if ENV_FILE.exists():

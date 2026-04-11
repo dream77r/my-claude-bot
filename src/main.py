@@ -325,57 +325,38 @@ async def run_bot(bridge: TelegramBridge) -> None:
         await app.shutdown()
 
 
-def _ensure_qmd(root: Path) -> None:
-    """Проверить наличие qmd, установить если нет."""
+def _cleanup_qmd() -> None:
+    """Удалить qmd и его кэш, если остались от предыдущих версий."""
     import shutil
-    import subprocess
 
-    qmd_path = Path.home() / ".local" / "bin" / "qmd"
+    home = Path.home()
+    qmd_bin = home / ".local" / "bin" / "qmd"
+    qmd_lib = home / ".local" / "lib" / "node_modules" / "@tobilu" / "qmd"
+    qmd_cache = home / ".cache" / "qmd"
 
-    if qmd_path.exists():
-        logger.info(f"qmd найден: {qmd_path}")
-        # Инициализировать коллекции для всех агентов если ещё нет
-        for agent_yaml in sorted((root / "agents").glob("*/agent.yaml")):
-            mem_dir = agent_yaml.parent / "memory"
-            if mem_dir.exists():
-                result = subprocess.run(
-                    [str(qmd_path), "collection", "list"],
-                    capture_output=True, text=True,
-                )
-                col_name = f"{agent_yaml.parent.name}-wiki"
-                if col_name not in result.stdout:
-                    logger.info(f"Создаю qmd-коллекцию '{col_name}'")
-                    subprocess.run(
-                        [str(qmd_path), "collection", "add", str(mem_dir), "--name", col_name],
-                        capture_output=True, text=True,
-                    )
-        return
+    cleaned = False
+    for path in [qmd_bin, qmd_lib, qmd_cache]:
+        if path.exists():
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                logger.info(f"qmd cleanup: удалён {path}")
+                cleaned = True
+            except OSError as e:
+                logger.warning(f"qmd cleanup: не удалось удалить {path}: {e}")
 
-    # qmd не установлен — попробовать установить
-    if not shutil.which("npm"):
-        logger.warning("qmd не установлен, npm не найден — семантический поиск недоступен")
-        return
+    # Почистить пустую директорию @tobilu если осталась
+    tobilu_dir = home / ".local" / "lib" / "node_modules" / "@tobilu"
+    if tobilu_dir.exists() and not any(tobilu_dir.iterdir()):
+        try:
+            tobilu_dir.rmdir()
+        except OSError:
+            pass
 
-    logger.info("Устанавливаю qmd (семантический поиск по wiki)...")
-    result = subprocess.run(
-        ["npm", "install", "-g", "@tobilu/qmd", "--prefix", str(Path.home() / ".local")],
-        capture_output=True, text=True, timeout=120,
-    )
-
-    if result.returncode == 0 and qmd_path.exists():
-        logger.info("qmd установлен успешно")
-        # Создать коллекции
-        for agent_yaml in sorted((root / "agents").glob("*/agent.yaml")):
-            mem_dir = agent_yaml.parent / "memory"
-            if mem_dir.exists():
-                col_name = f"{agent_yaml.parent.name}-wiki"
-                subprocess.run(
-                    [str(qmd_path), "collection", "add", str(mem_dir), "--name", col_name],
-                    capture_output=True, text=True,
-                )
-                logger.info(f"qmd-коллекция '{col_name}' создана")
-    else:
-        logger.warning(f"qmd не удалось установить: {result.stderr[:200]}")
+    if cleaned:
+        logger.info("qmd удалён — wiki-поиск работает через встроенный search_wiki()")
 
 
 async def async_main() -> None:
@@ -394,8 +375,8 @@ async def async_main() -> None:
             "Скопируй .env.example → .env и заполни токены."
         )
 
-    # Проверить и установить qmd (семантический поиск по wiki)
-    _ensure_qmd(root)
+    # Удалить qmd если остался от предыдущих версий (wiki-поиск теперь встроенный)
+    _cleanup_qmd()
 
     # Загрузить агентов
     agents = load_agents(root)
