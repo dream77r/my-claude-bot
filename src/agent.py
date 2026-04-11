@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -28,6 +29,9 @@ from claude_agent_sdk import (
 
 from . import memory
 from . import get_claude_cli_path
+from .command_guard import make_guard_hook
+from .consolidator import Consolidator
+from .hooks import HookContext, HookRegistry
 from .i18n import t
 from .tool_hints import format_tool_hint
 
@@ -64,6 +68,25 @@ class Agent:
 
         # Семафор для ограничения параллельных вызовов Claude
         self._semaphore: asyncio.Semaphore | None = None
+
+        # Hook-система (lifecycle hooks)
+        self.hooks = HookRegistry()
+
+        # Command Guard — on_tool_use хук (логирование опасных команд)
+        guard_enabled = self.config.get("command_guard", {}).get("enabled", True)
+        if guard_enabled:
+            self.hooks.register_fn(
+                "on_tool_use", "command_guard", make_guard_hook()
+            )
+
+        # Consolidator — сжатие контекста при длинных разговорах
+        consolidator_config = self.config.get("consolidator", {})
+        if consolidator_config.get("enabled", True):
+            self.consolidator: Consolidator | None = Consolidator(
+                self.config_path.parent.as_posix(), consolidator_config
+            )
+        else:
+            self.consolidator = None
 
         # Инициализация памяти
         memory.ensure_dirs(self.agent_dir)
@@ -331,7 +354,16 @@ class Agent:
         if isolation:
             parts.append(isolation)
 
-        # 6. Языковая инструкция
+        # 6. Сводка от Consolidator (если был сброс сессии)
+        if self.consolidator:
+            summary = self.consolidator.get_summary()
+            if summary:
+                parts.append(
+                    "## Сводка предыдущего разговора\n\n"
+                    "Контекст был сжат. Вот краткая сводка:\n\n" + summary
+                )
+
+        # 7. Языковая инструкция
         lang = memory.get_setting(self.agent_dir, "language")
         if lang:
             parts.append(t("system_lang_instruction", lang))
@@ -448,6 +480,31 @@ class Agent:
         # Модель: settings override → agent.yaml default
         active_model = memory.get_setting(self.agent_dir, "claude_model") or self.claude_model
 
+        # CLI hooks для Claude Code
+        cli_hooks = {
+            "PreCompact": [
+                {
+                    "type": "command",
+                    "command": (
+                        f'echo "\\n## Компакт сессии $(date +%H:%M)\\n'
+                        f'Контекст сжат. Ключевая информация сохранена в profile.md и wiki/." '
+                        f'>> {memory_path.resolve()}/daily/$(date +%Y-%m-%d).md'
+                    ),
+                }
+            ],
+        }
+
+        # Command Guard — PreToolUse хук для реальной блокировки
+        guard_config = self.config.get("command_guard", {})
+        if guard_config.get("enabled", True):
+            guard_script = Path(__file__).parent / "command_guard.py"
+            cli_hooks["PreToolUse"] = [
+                {
+                    "type": "command",
+                    "command": f"{sys.executable} {guard_script}",
+                }
+            ]
+
         # Собрать опции
         options = ClaudeAgentOptions(
             system_prompt=system_prompt,
@@ -456,18 +513,7 @@ class Agent:
             model=active_model,
             cli_path=get_claude_cli_path(),
             stderr=_on_stderr,
-            hooks={
-                "PreCompact": [
-                    {
-                        "type": "command",
-                        "command": (
-                            f'echo "\\n## Компакт сессии $(date +%H:%M)\\n'
-                            f'Контекст сжат. Ключевая информация сохранена в profile.md и wiki/." '
-                            f'>> {memory_path.resolve()}/daily/$(date +%Y-%m-%d).md'
-                        ),
-                    }
-                ],
-            },
+            hooks=cli_hooks,
         )
 
         if allowed_tools:
@@ -490,12 +536,22 @@ class Agent:
                                 await on_text_delta(result_text)
                             except Exception:
                                 pass
-                    elif isinstance(block, ToolUseBlock) and on_tool_use:
-                        hint = format_tool_hint(block.name, block.input)
-                        try:
-                            await on_tool_use(hint)
-                        except Exception:
-                            pass  # Не ломаем agent loop из-за UI
+                    elif isinstance(block, ToolUseBlock):
+                        # Hook: on_tool_use
+                        await self.hooks.emit("on_tool_use", HookContext(
+                            event="on_tool_use",
+                            agent_name=self.name,
+                            data={
+                                "tool_name": block.name,
+                                "tool_input": block.input,
+                            },
+                        ))
+                        if on_tool_use:
+                            hint = format_tool_hint(block.name, block.input)
+                            try:
+                                await on_tool_use(hint)
+                            except Exception:
+                                pass  # Не ломаем agent loop из-за UI
                 if msg.session_id:
                     new_session_id = msg.session_id
             elif isinstance(msg, ResultMessage):
@@ -510,8 +566,21 @@ class Agent:
             result_text = ""
             new_session_id = None
 
+            # Hook: before_call
+            before_ctx = await self.hooks.emit("before_call", HookContext(
+                event="before_call",
+                agent_name=self.name,
+                data={"message": prompt, "system_prompt": system_prompt},
+            ))
+            # Хук может модифицировать промпт
+            prompt_final = before_ctx.data.get("message", prompt)
+            if prompt_final != prompt:
+                options.system_prompt = before_ctx.data.get(
+                    "system_prompt", system_prompt
+                )
+
             try:
-                async for msg in query(prompt=prompt, options=options):
+                async for msg in query(prompt=prompt_final, options=options):
                     result_text, new_session_id = await _process_message(
                         msg, result_text, new_session_id
                     )
@@ -519,6 +588,13 @@ class Agent:
             except Exception as e:
                 error_name = type(e).__name__
                 logger.error(f"Claude SDK error ({error_name}): {e}")
+
+                # Hook: on_error
+                await self.hooks.emit("on_error", HookContext(
+                    event="on_error",
+                    agent_name=self.name,
+                    data={"error": e, "message": prompt_final},
+                ))
 
                 # Retry без --resume если сессия потеряна
                 stderr_text = " ".join(stderr_lines).lower()
@@ -528,7 +604,7 @@ class Agent:
                     memory.clear_session_id(self.agent_dir)
                     options.resume = None
                     try:
-                        async for msg in query(prompt=prompt, options=options):
+                        async for msg in query(prompt=prompt_final, options=options):
                             result_text, new_session_id = await _process_message(
                                 msg, result_text, new_session_id
                             )
@@ -544,6 +620,22 @@ class Agent:
 
             # Auto-commit памяти после каждого ответа
             memory.git_commit(self.agent_dir)
+
+            # Hook: after_call
+            await self.hooks.emit("after_call", HookContext(
+                event="after_call",
+                agent_name=self.name,
+                data={
+                    "message": prompt_final,
+                    "response": result_text,
+                },
+            ))
+
+            # Consolidator: трекинг + автосжатие
+            if self.consolidator and result_text:
+                self.consolidator.track(prompt_final, result_text)
+                if self.consolidator.needs_consolidation():
+                    await self.consolidator.consolidate()
 
             return result_text or "Не удалось получить ответ."
 
