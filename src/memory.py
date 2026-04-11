@@ -40,6 +40,7 @@ def ensure_dirs(agent_dir: str) -> None:
         "raw/files",
         "raw/conversations",
         "sessions",
+        "stats",
     ]:
         (memory / subdir).mkdir(parents=True, exist_ok=True)
 
@@ -129,9 +130,12 @@ STOP_WORDS = {
     "так", "все", "уже", "ещё", "тоже", "очень", "вот", "есть",
     # English
     "the", "a", "an", "is", "are", "was", "were", "be", "been",
-    "in", "on", "at", "to", "for", "of", "with", "and", "or",
-    "not", "this", "that", "it", "my", "your", "we", "they",
-    "what", "how", "can", "do", "has", "have",
+    "have", "has", "had", "do", "does", "did", "will", "would",
+    "can", "could", "should", "may", "might", "shall",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from",
+    "and", "or", "but", "if", "then", "than", "no", "not",
+    "it", "this", "that", "which", "who", "whom", "what", "how",
+    "my", "your", "we", "they",
 }
 
 # Максимум символов wiki-контекста в промпте
@@ -140,11 +144,11 @@ _WIKI_MAX_TOTAL_CHARS = 4000
 _WIKI_MAX_PAGE_CHARS = 1500
 
 
-def _tokenize(text: str) -> set[str]:
-    """Разбить текст на множество слов-токенов (lowercase, без стоп-слов)."""
+def _tokenize(text: str) -> list[str]:
+    """Разбить текст на токены (lowercase, без стоп-слов)."""
     import re as _re
     words = _re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text.lower())
-    return {w for w in words if w not in STOP_WORDS and len(w) > 1}
+    return [w for w in words if w not in STOP_WORDS and len(w) > 1]
 
 
 def search_wiki(agent_dir: str, query: str, max_results: int = 3) -> list[dict]:
@@ -169,6 +173,7 @@ def search_wiki(agent_dir: str, query: str, max_results: int = 3) -> list[dict]:
     if not wiki_dir.exists():
         return []
 
+    query_set = set(query_tokens)
     scored: list[dict] = []
 
     for md_file in wiki_dir.rglob("*.md"):
@@ -186,13 +191,13 @@ def search_wiki(agent_dir: str, query: str, max_results: int = 3) -> list[dict]:
                 break
 
         # Токенизировать содержимое, заголовок, имя файла
-        content_tokens = _tokenize(content)
-        title_tokens = _tokenize(title)
-        filename_tokens = _tokenize(md_file.stem)
+        content_tokens = set(_tokenize(content))
+        title_tokens = set(_tokenize(title))
+        filename_tokens = set(_tokenize(md_file.stem))
 
         # Подсчёт score
         score = 0.0
-        for qt in query_tokens:
+        for qt in query_set:
             if qt in content_tokens:
                 score += 1.0
             if qt in title_tokens:
@@ -201,8 +206,8 @@ def search_wiki(agent_dir: str, query: str, max_results: int = 3) -> list[dict]:
                 score += 2.0
 
         if score > 0:
-            # Относительный путь внутри wiki/
-            rel_path = str(md_file.relative_to(wiki_dir))
+            # Путь относительно memory/ (для совместимости с _get_hot_pages)
+            rel_path = str(md_file.relative_to(memory))
             scored.append({
                 "path": rel_path,
                 "title": title,
@@ -229,6 +234,10 @@ def search_wiki(agent_dir: str, query: str, max_results: int = 3) -> list[dict]:
                 break
         total_chars += len(page_content)
         trimmed.append({**r, "content": page_content})
+
+    # Трекинг: отмечаем использование возвращённых страниц
+    for r in trimmed:
+        track_page_hit(agent_dir, r["path"])
 
     return trimmed
 
@@ -271,6 +280,281 @@ def read_context(agent_dir: str, user_query: str = "") -> str:
             parts.append("\n## Релевантные знания из wiki\n")
             for r in wiki_results:
                 parts.append(f"### {r['title']} ({r['path']})\n{r['content']}\n")
+
+    return "\n".join(parts)
+
+
+
+
+# ── Smart Context Management ──
+
+CONTEXT_BUDGET = {
+    "profile": 2000,       # Профиль — самое важное, всегда полный
+    "hot_pages": 3000,     # Часто используемые wiki-страницы
+    "wiki_search": 2000,   # Релевантные страницы (из search_wiki)
+    "daily_recent": 2000,  # Последние сообщения сегодня
+    "daily_summary": 1000, # Краткое содержание ранних сообщений
+    "index": 1500,         # Каталог знаний (обрезается если большой)
+}
+
+
+def _read_with_limit(path: Path, limit: int) -> str:
+    """Прочитать файл, обрезать до limit символов с '...' если нужно."""
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def track_page_hit(agent_dir: str, page_path: str) -> None:
+    """Записать обращение к wiki-странице в stats/page_hits.json."""
+    memory = get_memory_path(agent_dir)
+    stats_dir = memory / "stats"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    hits_file = stats_dir / "page_hits.json"
+
+    data: dict = {}
+    if hits_file.exists():
+        try:
+            data = json.loads(hits_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if page_path in data:
+        data[page_path]["hits"] = data[page_path].get("hits", 0) + 1
+        data[page_path]["last"] = today
+    else:
+        data[page_path] = {"hits": 1, "last": today}
+
+    hits_file.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _get_hot_pages(
+    agent_dir: str, budget: int, exclude: list[str] | None = None
+) -> str:
+    """
+    Вернуть содержимое самых популярных wiki-страниц в рамках бюджета.
+
+    Score = hits * decay_factor, где decay = 0.9^days_since_last.
+    Страницы без обращений 30+ дней считаются 'cold' и исключаются.
+    """
+    memory = get_memory_path(agent_dir)
+    hits_file = memory / "stats" / "page_hits.json"
+    if not hits_file.exists():
+        return ""
+
+    try:
+        data = json.loads(hits_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+    if not data:
+        return ""
+
+    exclude_set = set(exclude or [])
+    today = datetime.now()
+    scored: list[tuple[str, float]] = []
+
+    for page_path, info in data.items():
+        if page_path in exclude_set:
+            continue
+        hits = info.get("hits", 0)
+        last_str = info.get("last", "")
+        try:
+            last_date = datetime.strptime(last_str, "%Y-%m-%d")
+        except ValueError:
+            continue
+
+        days_ago = (today - last_date).days
+        if days_ago >= 30:
+            continue  # cold page
+
+        decay = 0.9 ** days_ago
+        score = hits * decay
+        scored.append((page_path, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    parts = []
+    used = 0
+    for page_path, _score in scored:
+        full_path = memory / page_path
+        if not full_path.exists():
+            continue
+        try:
+            content = full_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        if used + len(content) > budget:
+            remaining = budget - used
+            if remaining > 100:  # только если есть место для осмысленного фрагмента
+                parts.append(content[:remaining] + "...")
+                used += remaining
+            break
+
+        parts.append(content)
+        used += len(content)
+
+    return "\n\n".join(parts)
+
+
+def _read_daily_smart(agent_dir: str, budget: dict) -> str:
+    """
+    Прочитать сегодняшнюю daily note с умным разделением:
+    - Последние N записей — полностью (budget["daily_recent"])
+    - Ранние записи — только первая строка каждой (budget["daily_summary"])
+
+    Записи разделяются по паттерну **HH:MM**.
+    Если всё помещается в суммарный бюджет — возвращает как есть.
+    """
+    import re as _re
+
+    memory = get_memory_path(agent_dir)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    daily_path = memory / "daily" / f"{today_str}.md"
+
+    if not daily_path.exists():
+        return ""
+
+    try:
+        text = daily_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    total_budget = budget.get("daily_recent", 2000) + budget.get("daily_summary", 1000)
+    if len(text) <= total_budget:
+        return text
+
+    # Разбить на записи по паттерну **HH:MM**
+    # Каждая запись начинается с \n**HH:MM** или начала файла
+    entries = _re.split(r"(?=\n\*\*\d{2}:\d{2}\*\*)", text)
+    # Первый элемент — заголовок дня (# YYYY-MM-DD ...)
+    header = entries[0] if entries else ""
+    message_entries = entries[1:] if len(entries) > 1 else []
+
+    if not message_entries:
+        return _read_with_limit(daily_path, total_budget)
+
+    # Определить сколько последних записей помещается в daily_recent
+    recent_budget = budget.get("daily_recent", 2000)
+    summary_budget = budget.get("daily_summary", 1000)
+
+    recent_entries: list[str] = []
+    recent_total = 0
+    for entry in reversed(message_entries):
+        if recent_total + len(entry) > recent_budget:
+            break
+        recent_entries.insert(0, entry)
+        recent_total += len(entry)
+
+    # Ранние записи (те, что не попали в recent)
+    recent_start_idx = len(message_entries) - len(recent_entries)
+    early_entries = message_entries[:recent_start_idx]
+
+    # Сжать ранние записи — только первая строка каждой
+    summary_parts = []
+    summary_total = 0
+    for entry in early_entries:
+        # Первая непустая строка записи
+        lines = entry.strip().split("\n")
+        first_line = lines[0] if lines else ""
+        if summary_total + len(first_line) + 1 > summary_budget:
+            break
+        summary_parts.append(first_line)
+        summary_total += len(first_line) + 1
+
+    # Собрать результат
+    parts = [header.strip()]
+    if summary_parts:
+        parts.append("\n...(краткое содержание раннего дня)...")
+        parts.append("\n".join(summary_parts))
+    if recent_entries:
+        parts.append("".join(recent_entries))
+
+    return "\n".join(parts)
+
+
+def build_smart_context(
+    agent_dir: str, user_query: str = "", budget: dict | None = None
+) -> str:
+    """
+    Собрать контекст с приоритизацией и символьным бюджетом.
+
+    Приоритеты (от высокого к низкому):
+    1. profile.md — кто пользователь
+    2. hot pages — часто читаемые wiki-страницы
+    3. wiki search — релевантные текущему запросу
+    4. Свежие daily — последние сообщения
+    5. Краткое содержание ранних daily — сжатые старые сообщения
+    6. index.md — каталог знаний
+    """
+    if budget is None:
+        budget = CONTEXT_BUDGET.copy()
+
+    memory = get_memory_path(agent_dir)
+    parts = []
+
+    # 1. Profile — приоритет #1, никогда не обрезается (если <2000)
+    profile_path = memory / "profile.md"
+    profile_text = _read_with_limit(profile_path, budget.get("profile", 2000))
+    if profile_text:
+        parts.append("## Профиль пользователя\n")
+        parts.append(profile_text)
+
+    # 2. Wiki search — релевантные страницы по запросу
+    wiki_search_paths: list[str] = []
+    if user_query:
+        search_results = search_wiki(agent_dir, user_query, max_results=3)
+        wiki_search_paths = [r["path"] for r in search_results]
+        wiki_budget = budget.get("wiki_search", 2000)
+        wiki_parts = []
+        wiki_used = 0
+        for r in search_results:
+            content = r["content"]
+            if wiki_used + len(content) > wiki_budget:
+                remaining = wiki_budget - wiki_used
+                if remaining > 100:
+                    wiki_parts.append(content[:remaining] + "...")
+                    wiki_used += remaining
+                break
+            wiki_parts.append(content)
+            wiki_used += len(content)
+
+        if wiki_parts:
+            parts.append("\n## Релевантные знания\n")
+            parts.append("\n\n".join(wiki_parts))
+
+    # 3. Hot pages — часто используемые (исключая уже добавленные из поиска)
+    hot_text = _get_hot_pages(
+        agent_dir,
+        budget.get("hot_pages", 3000),
+        exclude=wiki_search_paths,
+    )
+    if hot_text:
+        parts.append("\n## Часто используемые знания\n")
+        parts.append(hot_text)
+
+    # 4+5. Daily — свежие + краткое содержание ранних
+    daily_text = _read_daily_smart(agent_dir, budget)
+    if daily_text:
+        parts.append("\n## Сегодняшний лог\n")
+        parts.append(daily_text)
+
+    # 6. Index — каталог знаний
+    index_path = memory / "index.md"
+    index_text = _read_with_limit(index_path, budget.get("index", 1500))
+    if index_text:
+        parts.append("\n## Каталог знаний\n")
+        parts.append(index_text)
 
     return "\n".join(parts)
 
@@ -626,10 +910,10 @@ def git_init(agent_dir: str) -> bool:
         _run_git(memory, "config", "user.name", f"agent-{agent_name}")
         _run_git(memory, "config", "user.email", f"{agent_name}@my-claude-bot.local")
 
-        # .gitignore: не трекать сессии и raw conversations (большие файлы)
+        # .gitignore: не трекать сессии, raw conversations и статистику
         gitignore = memory / ".gitignore"
         gitignore.write_text(
-            "sessions/\nraw/conversations/\n", encoding="utf-8"
+            "sessions/\nraw/conversations/\nstats/\n", encoding="utf-8"
         )
 
         # Начальный коммит

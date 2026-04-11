@@ -326,7 +326,7 @@ class Agent:
         SOUL.md + system_prompt из YAML + skills + memory context
 
         Args:
-            user_query: текст сообщения пользователя для wiki-поиска
+            user_query: текущий запрос пользователя (для wiki search)
         """
         parts = []
 
@@ -344,8 +344,8 @@ class Agent:
         if skills:
             parts.append("## Скиллы\n\n" + skills)
 
-        # 4. Контекст из памяти (profile.md, index.md, daily note, wiki search)
-        ctx = memory.read_context(self.agent_dir, user_query=user_query)
+        # 4. Контекст из памяти (smart: profile, hot pages, wiki search, daily, index)
+        ctx = memory.build_smart_context(self.agent_dir, user_query=user_query)
         if ctx:
             parts.append("## Контекст из памяти\n\n" + ctx)
 
