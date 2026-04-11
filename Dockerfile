@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir \
 COPY --chown=botuser:botuser src/ src/
 COPY --chown=botuser:botuser agents/ agents/
 
+# Entrypoint: auto-detect Claude CLI из смонтированного volumes
+COPY --chown=botuser:botuser entrypoint.sh /app/entrypoint.sh
+
 # Работаем от обычного пользователя (не root)
 USER botuser
 
@@ -30,4 +33,5 @@ USER botuser
 # Память хранится в volume (не теряется при перезапуске)
 VOLUME /app/agents/me/memory
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python3", "-m", "src.main"]

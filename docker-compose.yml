@@ -8,12 +8,11 @@ services:
     volumes:
       # Все агенты: память, SOUL, скиллы, шаблоны
       - ./agents:/app/agents
-      # Claude CLI — бинарник с хоста (укажите свои пути)
-      - ${HOME}/.local/share/claude:/home/botuser/.local/share/claude:ro
-      - ${HOME}/.local/bin/claude:/usr/local/bin/claude:ro
+      # Claude CLI — бинарники (entrypoint.sh сам найдёт нужную версию)
+      - ${HOST_HOME}/.local/share/claude:/home/botuser/.local/share/claude:ro
       # Claude CLI config (авторизация)
-      - ${HOME}/.claude:/home/botuser/.claude
-      - ${HOME}/.claude.json:/home/botuser/.claude.json
+      - ${HOST_HOME}/.claude:/home/botuser/.claude
+      - ${HOST_HOME}/.claude.json:/home/botuser/.claude.json
     deploy:
       resources:
         limits:

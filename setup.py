@@ -134,7 +134,9 @@ def ask_deepgram_key() -> str:
 
 def write_env(token: str, user_id: str, deepgram_key: str = ""):
     """Записать .env файл."""
+    home_dir = os.path.expanduser("~")
     content = f"""# My Claude Bot
+HOST_HOME={home_dir}
 ME_BOT_TOKEN={token}
 FOUNDER_TELEGRAM_ID={user_id}
 """
