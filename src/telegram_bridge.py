@@ -1822,6 +1822,10 @@ class TelegramBridge:
                 thread_id = msg.metadata.get("message_thread_id")
 
                 if event == "processing_started":
+                    # Остановить старый typing (если был из _flush_buffer)
+                    old_status = self._status_messages.pop(chat_id, None)
+                    if old_status:
+                        old_status._stop_typing()
                     # Создать статус-сообщение с typing keepalive
                     status = StatusMessage(chat_id, app, thread_id)
                     await status.show("Думаю...")
