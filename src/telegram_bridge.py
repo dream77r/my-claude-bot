@@ -581,8 +581,9 @@ class TelegramBridge:
                     await update.message.reply_text("Эта команда доступна только владельцу.")
                     return
         else:
-            # В DM: стандартная проверка auth
-            if not self._check_auth(update):
+            # В DM: /start пропускает auth (для авто-регистрации нового клиента)
+            cmd = text.split()[0].split("@")[0].lower()
+            if cmd != "/start" and not self._check_auth(update):
                 return
 
         result = self.router.route(text)
