@@ -53,6 +53,12 @@ MESSAGE_BUFFER_DELAY = 0.6
 # Минимальный интервал между edit-сообщениями (coalescing)
 EDIT_MIN_INTERVAL = 0.5
 
+# Интервал для streaming текста (быстрее чем tool hints)
+STREAM_EDIT_INTERVAL = 0.3
+
+# Интервал typing indicator (секунды)
+TYPING_KEEPALIVE_INTERVAL = 4
+
 # Команды для меню бота (кнопка "/" в Telegram)
 BOT_COMMANDS = [
     BotCommand("help", "Справка по командам"),
@@ -63,6 +69,7 @@ BOT_COMMANDS = [
     BotCommand("restore", "Откатить память"),
     BotCommand("dream", "Запустить Dream-обработку памяти"),
     BotCommand("model", "Сменить модель Claude"),
+    BotCommand("stats", "Статистика использования"),
     BotCommand("agents", "Список всех агентов"),
     BotCommand("create_agent", "Создать нового агента"),
     BotCommand("stop_agent", "Остановить агента"),
@@ -237,36 +244,79 @@ class StatusMessage:
     """
     Сообщение-статус с защитой от rate limit (delta coalescing).
 
-    Показывает пользователю что делает агент (tool hints),
+    Показывает пользователю что делает агент (tool hints и streaming текст),
     ограничивая edit-запросы до 1 раз в EDIT_MIN_INTERVAL секунд.
+
+    Поддерживает typing keepalive и финальный edit вместо delete+new.
     """
 
-    def __init__(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    def __init__(self, chat_id: int, context, thread_id: int | None = None):
         self.chat_id = chat_id
         self.context = context
+        self.thread_id = thread_id
         self.message_id: int | None = None
         self._last_edit: float = 0
         self._pending_text: str | None = None
         self._pending_task: asyncio.Task | None = None
+        self._typing_task: asyncio.Task | None = None
+        self._is_streaming: bool = False
 
-    async def show(self, text: str) -> None:
+    async def show(self, text: str, streaming: bool = False) -> None:
         """Показать или обновить статус (с coalescing)."""
+        self._is_streaming = streaming
+        interval = STREAM_EDIT_INTERVAL if streaming else EDIT_MIN_INTERVAL
         now = time.monotonic()
         elapsed = now - self._last_edit
 
-        if elapsed >= EDIT_MIN_INTERVAL:
+        if elapsed >= interval:
             await self._do_edit(text)
         else:
             # Отложить обновление
             self._pending_text = text
             if not self._pending_task or self._pending_task.done():
-                delay = EDIT_MIN_INTERVAL - elapsed
+                delay = interval - elapsed
                 self._pending_task = asyncio.create_task(
                     self._delayed_edit(delay)
                 )
 
+    async def finalize(self, text: str) -> bool:
+        """
+        Финальное обновление — edit вместо delete+new.
+
+        Returns:
+            True если удалось отредактировать на месте.
+            False если нужен новый send (длинный текст, ошибка edit).
+        """
+        self._stop_typing()
+        if self._pending_task and not self._pending_task.done():
+            self._pending_task.cancel()
+
+        if not self.message_id:
+            return False
+
+        # Если текст влезает в одно сообщение — edit на месте
+        if len(text) <= TG_MESSAGE_LIMIT:
+            try:
+                await self.context.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=self.message_id,
+                    text=text,
+                )
+                self.message_id = None  # Больше не управляем этим сообщением
+                return True
+            except Exception as e:
+                logger.debug(f"Finalize edit failed: {e}")
+                # Если edit не сработал — fallback на delete+send
+                await self.cleanup()
+                return False
+
+        # Длинный текст — нужен split, delete статус
+        await self.cleanup()
+        return False
+
     async def cleanup(self) -> None:
         """Удалить статус-сообщение после завершения."""
+        self._stop_typing()
         if self._pending_task and not self._pending_task.done():
             self._pending_task.cancel()
         if self.message_id:
@@ -278,6 +328,34 @@ class StatusMessage:
             except Exception:
                 pass  # Сообщение могло быть уже удалено
             self.message_id = None
+
+    def start_typing(self) -> None:
+        """Запустить typing keepalive (ChatAction.TYPING каждые 4 секунды)."""
+        if self._typing_task and not self._typing_task.done():
+            return
+        self._typing_task = asyncio.create_task(self._typing_loop())
+
+    def _stop_typing(self) -> None:
+        """Остановить typing keepalive."""
+        if self._typing_task and not self._typing_task.done():
+            self._typing_task.cancel()
+            self._typing_task = None
+
+    async def _typing_loop(self) -> None:
+        """Цикл отправки ChatAction.TYPING."""
+        try:
+            while True:
+                try:
+                    await self.context.bot.send_chat_action(
+                        chat_id=self.chat_id,
+                        action=ChatAction.TYPING,
+                        message_thread_id=self.thread_id,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL)
+        except asyncio.CancelledError:
+            pass
 
     async def _delayed_edit(self, delay: float) -> None:
         """Отложенное обновление для coalescing."""
@@ -301,6 +379,7 @@ class StatusMessage:
                 msg = await self.context.bot.send_message(
                     chat_id=self.chat_id,
                     text=text[:TG_MESSAGE_LIMIT],
+                    message_thread_id=self.thread_id,
                 )
                 self.message_id = msg.message_id
         except Exception as e:
@@ -339,15 +418,6 @@ class TelegramBridge:
         # Telegram app (сохраняем для bus listener)
         self._app: Application | None = None
 
-    def _get_master_agent_dir(self) -> str | None:
-        """Получить agent_dir master-агента (для каскадных настроек)."""
-        if not self.fleet_runtime:
-            return None
-        for agent in self.fleet_runtime.agents.values():
-            if agent.is_master:
-                return agent.agent_dir
-        return None
-
         # Thread ID (топики) для каждого chat_id — для ответа в правильном топике
         self._thread_ids: dict[int, int | None] = {}
 
@@ -364,6 +434,15 @@ class TelegramBridge:
 
         # Command router
         self.router = self._build_router()
+
+    def _get_master_agent_dir(self) -> str | None:
+        """Получить agent_dir master-агента (для каскадных настроек)."""
+        if not self.fleet_runtime:
+            return None
+        for agent in self.fleet_runtime.agents.values():
+            if agent.is_master:
+                return agent.agent_dir
+        return None
 
     def _build_router(self) -> CommandRouter:
         """Создать и настроить роутер команд."""
@@ -382,6 +461,7 @@ class TelegramBridge:
         router.exact("/status", self._cmd_status)
         router.exact("/dream", self._cmd_dream)
         router.exact("/model", self._cmd_model)
+        router.exact("/stats", self._cmd_stats)
 
         # Agent Manager commands
         router.exact("/agents", self._cmd_agents)
@@ -797,6 +877,22 @@ class TelegramBridge:
 
         await self._reply(update, context, "\n".join(status_lines))
 
+    async def _cmd_stats(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Показать статистику использования."""
+        from .metrics import format_stats, get_stats
+
+        # Парсить период: /stats 7 → за 7 дней
+        days = 1
+        if args.strip().isdigit():
+            days = int(args.strip())
+            days = max(1, min(days, 90))  # Лимит 1-90 дней
+
+        stats = get_stats(self.agent.agent_dir, days=days)
+        text = format_stats(stats)
+        await self._reply(update, context, text)
+
     async def _cmd_memory_log(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
@@ -1184,9 +1280,10 @@ class TelegramBridge:
         if self.bus:
             from .bus import FleetMessage, MessageType
 
-            # Показать статус
-            status = StatusMessage(chat_id, context)
+            # Показать статус с typing keepalive
+            status = StatusMessage(chat_id, context, thread_id)
             await status.show("Думаю...")
+            status.start_typing()
             self._status_messages[chat_id] = status
 
             # Опубликовать в bus → orchestrator → agent_worker
@@ -1209,8 +1306,9 @@ class TelegramBridge:
             return
 
         # ── Fallback: прямой вызов (без bus) ──
-        status = StatusMessage(chat_id, context)
+        status = StatusMessage(chat_id, context, thread_id)
         await status.show("Думаю...")
+        status.start_typing()
 
         task = asyncio.current_task()
         self._active_tasks[chat_id] = task
@@ -1221,19 +1319,33 @@ class TelegramBridge:
                 files or None,
                 self.semaphore,
                 on_tool_use=lambda hint: status.show(f"⏳ {hint}"),
+                on_text_delta=lambda text: status.show(
+                    text[:TG_MESSAGE_LIMIT - 20] + ("\n..." if len(text) > TG_MESSAGE_LIMIT - 20 else ""),
+                    streaming=True,
+                ),
                 group_chat_id=chat_id if is_group else None,
             )
 
             memory.log_message(self.agent.agent_dir, "assistant", response)
 
-            await status.cleanup()
-            await send_long_message(
-                chat_id, response, context, message_thread_id=thread_id
-            )
-
-            # Отправить файлы из outbox (fallback режим)
+            # Проверить outbox файлы
             from .file_handler import scan_outbox, clear_outbox
             outbox_files = scan_outbox(self.agent.agent_dir)
+
+            # Финализация: edit на месте если корот��о и нет файлов
+            finalized = False
+            if not outbox_files:
+                finalized = await status.finalize(response)
+            else:
+                await status.cleanup()
+
+            # Ес��и edit не удался — отправить новым сообщением
+            if not finalized:
+                await send_long_message(
+                    chat_id, response, context, message_thread_id=thread_id
+                )
+
+            # Отправить файлы из outbox
             if outbox_files:
                 for fpath in outbox_files:
                     try:
@@ -1710,9 +1822,10 @@ class TelegramBridge:
                 thread_id = msg.metadata.get("message_thread_id")
 
                 if event == "processing_started":
-                    # Создать статус-сообщение
-                    status = StatusMessage(chat_id, app)
+                    # Создать статус-сообщение с typing keepalive
+                    status = StatusMessage(chat_id, app, thread_id)
                     await status.show("Думаю...")
+                    status.start_typing()
                     self._status_messages[chat_id] = status
 
                 elif event == "tool_use":
@@ -1722,26 +1835,32 @@ class TelegramBridge:
                         await status.show(f"⏳ {msg.content}")
 
                 elif event == "text_delta":
-                    # Streaming: показать накопленный текст
+                    # Streaming: показать накопленный текст (быстрый интервал)
                     status = self._status_messages.get(chat_id)
                     if status:
                         # Обрезать до лимита Telegram
                         preview = msg.content[:TG_MESSAGE_LIMIT - 20]
                         if len(msg.content) > TG_MESSAGE_LIMIT - 20:
                             preview += "\n..."
-                        await status.show(preview)
+                        await status.show(preview, streaming=True)
 
                 elif event == "response":
-                    # Финальный ответ — убрать статус и отправить полный текст
+                    # Финальный ответ
                     status = self._status_messages.pop(chat_id, None)
-                    if status:
-                        await status.cleanup()
                     memory.log_message(
                         self.agent.agent_dir, "assistant", msg.content
                     )
-                    await self._send_via_bot(
-                        app, chat_id, msg.content, thread_id
-                    )
+                    # Попробовать edit на месте (без flash)
+                    finalized = False
+                    if status and not msg.files:
+                        finalized = await status.finalize(msg.content)
+                    elif status:
+                        await status.cleanup()
+                    # Если edit не удался — отправить новым сообщением
+                    if not finalized:
+                        await self._send_via_bot(
+                            app, chat_id, msg.content, thread_id
+                        )
                     # Отправить файлы из outbox (если есть)
                     if msg.files:
                         await self._send_outbox_files(
