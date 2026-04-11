@@ -111,44 +111,49 @@ if [ -z "$REMOTE" ]; then
 fi
 
 if [ "$LOCAL" = "$REMOTE" ]; then
-    echo -e "${GREEN}  ✓ Already up to date!${RESET}"
+    echo -e "${GREEN}  ✓ Code is up to date${RESET}"
     if [ "$STASHED" -eq 1 ]; then
         git stash pop --quiet
         echo -e "${GREEN}  ✓ Local changes restored${RESET}"
     fi
-    echo ""
-    exit 0
-fi
-
-# Показать что нового
-NEW_COMMITS=$(git log --oneline "${LOCAL}..${REMOTE}" 2>/dev/null)
-COMMIT_COUNT=$(echo "$NEW_COMMITS" | wc -l)
-
-echo -e "  ${CYAN}${COMMIT_COUNT} new commit(s):${RESET}"
-echo "$NEW_COMMITS" | head -15 | while read -r line; do echo -e "    ${DIM}${line}${RESET}"; done
-if [ "$COMMIT_COUNT" -gt 15 ]; then
-    echo -e "    ${DIM}... and $((COMMIT_COUNT - 15)) more${RESET}"
-fi
-
-# Pull
-git pull --ff-only origin "$BRANCH" 2>/dev/null
-echo -e "${GREEN}  ✓ Code updated${RESET}"
-
-# ══════════════════════════════════════════
-# Обновление зависимостей
-# ══════════════════════════════════════════
-
-echo ""
-echo -e "${BOLD}Updating dependencies...${RESET}"
-
-# Проверяем, изменился ли requirements.txt
-REQ_CHANGED=$(git diff --name-only "${LOCAL}..HEAD" -- requirements.txt 2>/dev/null || true)
-
-if [ -n "$REQ_CHANGED" ]; then
-    python3 -m pip install --user -q -r requirements.txt 2>&1 | tail -5
-    echo -e "${GREEN}  ✓ Dependencies updated${RESET}"
+    # Не выходим — всё равно перезапустим сервис
+    # (код мог быть обновлён через git pull до запуска скрипта)
+    ALREADY_CURRENT=1
 else
-    echo -e "${GREEN}  ✓ No dependency changes${RESET}"
+    ALREADY_CURRENT=0
+fi
+
+if [ "$ALREADY_CURRENT" -eq 0 ]; then
+    # Показать что нового
+    NEW_COMMITS=$(git log --oneline "${LOCAL}..${REMOTE}" 2>/dev/null)
+    COMMIT_COUNT=$(echo "$NEW_COMMITS" | wc -l)
+
+    echo -e "  ${CYAN}${COMMIT_COUNT} new commit(s):${RESET}"
+    echo "$NEW_COMMITS" | head -15 | while read -r line; do echo -e "    ${DIM}${line}${RESET}"; done
+    if [ "$COMMIT_COUNT" -gt 15 ]; then
+        echo -e "    ${DIM}... and $((COMMIT_COUNT - 15)) more${RESET}"
+    fi
+
+    # Pull
+    git pull --ff-only origin "$BRANCH" 2>/dev/null
+    echo -e "${GREEN}  ✓ Code updated${RESET}"
+
+    # ══════════════════════════════════════════
+    # Обновление зависимостей
+    # ══════════════════════════════════════════
+
+    echo ""
+    echo -e "${BOLD}Updating dependencies...${RESET}"
+
+    # Проверяем, изменился ли requirements.txt
+    REQ_CHANGED=$(git diff --name-only "${LOCAL}..HEAD" -- requirements.txt 2>/dev/null || true)
+
+    if [ -n "$REQ_CHANGED" ]; then
+        python3 -m pip install --user -q -r requirements.txt 2>&1 | tail -5
+        echo -e "${GREEN}  ✓ Dependencies updated${RESET}"
+    else
+        echo -e "${GREEN}  ✓ No dependency changes${RESET}"
+    fi
 fi
 
 # ══════════════════════════════════════════
