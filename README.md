@@ -42,10 +42,10 @@ Open Telegram and message your bot — it handles everything else (onboarding, l
 ## Updating
 
 ```bash
-./update.sh
+git pull && ./update.sh
 ```
 
-The script will pull the latest code, update dependencies if needed, and restart the service. Your data is safe -- `.env`, agent memory, `SOUL.md`, and settings are never touched.
+One command: pulls the latest code, updates dependencies if needed, and restarts the service. Your data is safe -- `.env`, agent memory, `SOUL.md`, and settings are never touched.
 
 ## Running with systemd (recommended)
 
