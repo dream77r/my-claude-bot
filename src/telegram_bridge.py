@@ -338,6 +338,15 @@ class TelegramBridge:
         # Telegram app (сохраняем для bus listener)
         self._app: Application | None = None
 
+    def _get_master_agent_dir(self) -> str | None:
+        """Получить agent_dir master-агента (для каскадных настроек)."""
+        if not self.fleet_runtime:
+            return None
+        for agent in self.fleet_runtime.agents.values():
+            if agent.is_master:
+                return agent.agent_dir
+        return None
+
         # Thread ID (топики) для каждого chat_id — для ответа в правильном топике
         self._thread_ids: dict[int, int | None] = {}
 
@@ -1479,7 +1488,8 @@ class TelegramBridge:
                 return
 
         # Проверить что Deepgram настроен
-        if not get_deepgram_api_key(self.agent.agent_dir):
+        master_dir = self._get_master_agent_dir()
+        if not get_deepgram_api_key(self.agent.agent_dir, master_dir):
             await update.message.reply_text(
                 "Голосовые сообщения пока не настроены.\n"
                 "Отправь мне ключ Deepgram API — и я включу распознавание голоса.\n"
@@ -1498,7 +1508,11 @@ class TelegramBridge:
             )
 
             # Транскрибировать
-            transcript = await transcribe(ogg_path, agent_dir=self.agent.agent_dir)
+            transcript = await transcribe(
+                ogg_path,
+                agent_dir=self.agent.agent_dir,
+                master_agent_dir=master_dir,
+            )
 
             # Добавить в буфер как текст (с пометкой что это голосовое)
             text = f"[голосовое сообщение]: {transcript}"

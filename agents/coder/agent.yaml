@@ -38,5 +38,14 @@ dream:
   model_phase1: "haiku"
   model_phase2: "sonnet"
 
+# SkillAdvisor — анализ паттернов и предложение скиллов (Phase 3 Dream)
+# Анализирует разговоры, находит повторяющиеся запросы,
+# предлагает новые скиллы и отправляет предложения мастер-агенту
+skill_advisor:
+  enabled: true
+  model: "haiku"               # модель для анализа паттернов
+  analysis_days: 7             # период анализа (дней)
+  master_name: "me"            # имя master-агента для отчётов
+
 heartbeat:
   enabled: false

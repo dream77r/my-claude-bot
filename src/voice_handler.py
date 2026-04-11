@@ -23,18 +23,31 @@ DEEPGRAM_API_URL = "https://api.deepgram.com/v1/listen"
 DEEPGRAM_TIMEOUT = 30  # секунд
 
 
-def get_deepgram_api_key(agent_dir: str | None = None) -> str | None:
+def get_deepgram_api_key(
+    agent_dir: str | None = None,
+    master_agent_dir: str | None = None,
+) -> str | None:
     """
     Получить API ключ Deepgram.
 
-    Приоритет:
-    1. settings.json агента (ключ введён через чат)
-    2. Переменная окружения DEEPGRAM_API_KEY (из .env)
+    Каскадный поиск:
+    1. settings.json агента (свой ключ, введён через чат)
+    2. settings.json master-агента (общий ключ)
+    3. Переменная окружения DEEPGRAM_API_KEY (из .env)
     """
+    # 1. Свой ключ агента
     if agent_dir:
         key = memory.get_setting(agent_dir, "deepgram_api_key")
         if key:
             return key
+
+    # 2. Ключ master-агента (общий для всего fleet)
+    if master_agent_dir and master_agent_dir != agent_dir:
+        key = memory.get_setting(master_agent_dir, "deepgram_api_key")
+        if key:
+            return key
+
+    # 3. Переменная окружения
     return os.environ.get("DEEPGRAM_API_KEY")
 
 
@@ -69,6 +82,7 @@ async def transcribe(
     audio_path: str,
     language: str = "ru",
     agent_dir: str | None = None,
+    master_agent_dir: str | None = None,
 ) -> str:
     """
     Транскрибировать аудиофайл через Deepgram API.
@@ -77,6 +91,7 @@ async def transcribe(
         audio_path: путь к OGG файлу
         language: код языка (по умолчанию "ru")
         agent_dir: путь к директории агента (для чтения ключа из settings.json)
+        master_agent_dir: путь к master-агенту (fallback для общего ключа)
 
     Returns:
         Текст транскрипции
@@ -85,7 +100,7 @@ async def transcribe(
         RuntimeError: если транскрипция не удалась
         ValueError: если нет API ключа
     """
-    api_key = get_deepgram_api_key(agent_dir)
+    api_key = get_deepgram_api_key(agent_dir, master_agent_dir)
     if not api_key:
         raise ValueError(
             "DEEPGRAM_API_KEY не задан. Добавь его в .env файл."

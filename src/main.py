@@ -25,6 +25,11 @@ from .delegation import DelegationManager
 from .dream import dream_loop
 from .heartbeat import heartbeat_loop
 from .orchestrator import Orchestrator
+from .skill_advisor import (
+    SkillSuggestionReceiver,
+    run_daily_digest,
+    skill_digest_loop,
+)
 from .smart_heartbeat import SmartHeartbeat
 from .telegram_bridge import TelegramBridge
 
@@ -185,14 +190,38 @@ class FleetRuntime:
             delegation_task = asyncio.create_task(delegation.watch())
             agent_tasks.append(delegation_task)
 
+            # SkillSuggestionReceiver (master принимает предложения)
+            receiver = SkillSuggestionReceiver(
+                agent.agent_dir, agent.name, self.bus
+            )
+            receiver_task = asyncio.create_task(receiver.run())
+            agent_tasks.append(receiver_task)
+
+            # SkillDigest loop (ежедневная сводка владельцу)
+            sa_master_config = agent.config.get("skill_advisor_digest", {})
+            digest_hour = sa_master_config.get("hour", 20)
+            digest_task = asyncio.create_task(
+                skill_digest_loop(
+                    agent.agent_dir, agent.name, self.bus,
+                    check_hour=digest_hour,
+                )
+            )
+            agent_tasks.append(digest_task)
+
         # Dream
         dream_config = agent.config.get("dream", {})
         if dream_config:
             interval = dream_config.get("interval_hours", 2.0)
             model_p1 = dream_config.get("model_phase1", "haiku")
             model_p2 = dream_config.get("model_phase2", "sonnet")
+            sa_config = agent.config.get("skill_advisor")
             dream_task = asyncio.create_task(
-                dream_loop(agent.agent_dir, interval, model_p1, model_p2)
+                dream_loop(
+                    agent.agent_dir, interval, model_p1, model_p2,
+                    skill_advisor_config=sa_config,
+                    bus=self.bus,
+                    agent_name=agent.name,
+                )
             )
             agent_tasks.append(dream_task)
 
@@ -380,6 +409,36 @@ async def async_main() -> None:
         tasks.append(delegation_task)
         logger.info(f"DelegationManager запущен для master '{agent.name}'")
 
+    # ── SkillAdvisor Receiver + Digest (для master-агентов) ──
+    for agent in agents:
+        if not agent.is_master:
+            continue
+
+        # Receiver — принимает предложения от worker-агентов
+        receiver = SkillSuggestionReceiver(agent.agent_dir, agent.name, bus)
+        receiver_task = asyncio.create_task(receiver.run())
+        if agent.name in runtime.tasks:
+            runtime.tasks[agent.name].append(receiver_task)
+        tasks.append(receiver_task)
+
+        # Digest loop — ежедневная сводка владельцу
+        sa_master_config = agent.config.get("skill_advisor_digest", {})
+        digest_hour = sa_master_config.get("hour", 20)
+        digest_task = asyncio.create_task(
+            skill_digest_loop(
+                agent.agent_dir, agent.name, bus,
+                check_hour=digest_hour,
+            )
+        )
+        if agent.name in runtime.tasks:
+            runtime.tasks[agent.name].append(digest_task)
+        tasks.append(digest_task)
+
+        logger.info(
+            f"SkillAdvisor запущен для master '{agent.name}': "
+            f"receiver + digest (в {digest_hour}:00)"
+        )
+
     # ── Dream Memory ──
     for agent in agents:
         dream_config = agent.config.get("dream", {})
@@ -387,14 +446,26 @@ async def async_main() -> None:
             interval = dream_config.get("interval_hours", 2.0)
             model_p1 = dream_config.get("model_phase1", "haiku")
             model_p2 = dream_config.get("model_phase2", "sonnet")
+
+            # Phase 3: SkillAdvisor (для worker-агентов)
+            sa_config = agent.config.get("skill_advisor")
+
             dream_task = asyncio.create_task(
-                dream_loop(agent.agent_dir, interval, model_p1, model_p2)
+                dream_loop(
+                    agent.agent_dir, interval, model_p1, model_p2,
+                    skill_advisor_config=sa_config,
+                    bus=bus,
+                    agent_name=agent.name,
+                )
             )
             # Добавить в runtime
             if agent.name in runtime.tasks:
                 runtime.tasks[agent.name].append(dream_task)
             tasks.append(dream_task)
-            logger.info(f"Dream loop запущен для '{agent.name}' (каждые {interval}ч)")
+            logger.info(
+                f"Dream loop запущен для '{agent.name}' (каждые {interval}ч)"
+                + (", skill_advisor включён" if sa_config else "")
+            )
 
     # ── Heartbeat (smart или legacy) ──
     for agent in agents:

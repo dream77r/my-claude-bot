@@ -138,18 +138,28 @@ async def dream_cycle(
     agent_dir: str,
     model_phase1: str = "haiku",
     model_phase2: str = "sonnet",
+    skill_advisor_config: dict | None = None,
+    bus=None,
+    agent_name: str = "",
 ) -> dict:
     """
     Выполнить один Dream-цикл.
 
+    Args:
+        skill_advisor_config: конфиг Phase 3 (skill_advisor из agent.yaml)
+        bus: FleetBus для отправки предложений мастеру
+        agent_name: имя агента (для Phase 3)
+
     Returns:
-        dict с ключами: facts_count, summary, phase1_ok, phase2_ok
+        dict с ключами: facts_count, summary, phase1_ok, phase2_ok, phase3_ok
     """
     result = {
         "facts_count": 0,
         "summary": "",
         "phase1_ok": False,
         "phase2_ok": False,
+        "phase3_ok": False,
+        "skill_suggestions": 0,
     }
 
     # Получить необработанные сообщения
@@ -238,10 +248,56 @@ async def dream_cycle(
     # Git commit
     memory.git_commit(agent_dir, f"Dream cycle: {len(facts)} facts extracted")
 
+    # ── Phase 3: Анализ паттернов и предложение скиллов ──
+    if skill_advisor_config and skill_advisor_config.get("enabled", False):
+        try:
+            from .skill_advisor import (
+                analyze_patterns,
+                report_to_master,
+                store_suggestions,
+            )
+
+            sa_model = skill_advisor_config.get("model", "haiku")
+            sa_days = skill_advisor_config.get("analysis_days", 7)
+            master_name = skill_advisor_config.get("master_name", "me")
+
+            suggestions = await analyze_patterns(
+                agent_dir,
+                agent_name=agent_name,
+                model=sa_model,
+                days=sa_days,
+            )
+
+            if suggestions:
+                # Сохранить локально
+                store_suggestions(agent_dir, suggestions)
+                result["skill_suggestions"] = len(suggestions)
+
+                # Отправить мастеру
+                if bus:
+                    await report_to_master(
+                        agent_name, suggestions, bus, master_name
+                    )
+
+                result["phase3_ok"] = True
+                logger.info(
+                    f"Dream Phase 3: {len(suggestions)} предложений по скиллам"
+                )
+            else:
+                result["phase3_ok"] = True  # OK но без предложений
+        except Exception as e:
+            logger.error(f"Dream Phase 3 error: {e}")
+
     logger.info(
         f"Dream завершён: {len(facts)} фактов, "
         f"phase1={'ok' if result['phase1_ok'] else 'fail'}, "
         f"phase2={'ok' if result['phase2_ok'] else 'fail'}"
+        + (
+            f", phase3={'ok' if result['phase3_ok'] else 'fail'} "
+            f"({result['skill_suggestions']} suggestions)"
+            if skill_advisor_config and skill_advisor_config.get("enabled")
+            else ""
+        )
     )
 
     return result
@@ -281,22 +337,38 @@ async def dream_loop(
     interval_hours: float = 2.0,
     model_phase1: str = "haiku",
     model_phase2: str = "sonnet",
+    skill_advisor_config: dict | None = None,
+    bus=None,
+    agent_name: str = "",
 ) -> None:
     """
     Бесконечный цикл Dream-обработки.
 
     Запускается как asyncio.Task при старте агента.
+
+    Args:
+        skill_advisor_config: конфиг Phase 3 (анализ паттернов)
+        bus: FleetBus для отправки предложений мастеру
+        agent_name: имя агента
     """
     interval_seconds = interval_hours * 3600
     logger.info(
         f"Dream loop запущен для {agent_dir}, "
         f"интервал: {interval_hours}ч"
+        + (", skill_advisor включён" if skill_advisor_config else "")
     )
 
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            result = await dream_cycle(agent_dir, model_phase1, model_phase2)
+            result = await dream_cycle(
+                agent_dir,
+                model_phase1,
+                model_phase2,
+                skill_advisor_config=skill_advisor_config,
+                bus=bus,
+                agent_name=agent_name,
+            )
             logger.info(f"Dream result: {result}")
         except asyncio.CancelledError:
             logger.info("Dream loop остановлен")

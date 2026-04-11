@@ -54,5 +54,12 @@ dream:
   model_phase1: "haiku"
   model_phase2: "sonnet"
 
+# SkillAdvisor — анализ паттернов и предложение скиллов (Phase 3 Dream)
+skill_advisor:
+  enabled: true
+  model: "haiku"
+  analysis_days: 7
+  master_name: "me"
+
 heartbeat:
   enabled: false

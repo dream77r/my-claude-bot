@@ -50,6 +50,12 @@ claude_flags:
 #     env:
 #       GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN}"
 
+# SkillAdvisor Digest — ежедневная сводка предложений по скиллам
+# Master получает предложения от worker-агентов и раз в день
+# отправляет дайджест владельцу
+skill_advisor_digest:
+  hour: 20                     # час отправки дайджеста (20:00)
+
 # Dream Memory — фоновая обработка памяти по расписанию
 dream:
   interval_hours: 2          # каждые 2 часа
