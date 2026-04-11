@@ -1,0 +1,36 @@
+# Секреты
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Агенты: исключаем ВСЁ содержимое, потом разрешаем только шаблоны
+# Это защищает от утечки SOUL.md и конфигов с личными данными
+agents/*/memory/
+agents/*/SOUL.md
+agents/*/HEARTBEAT.md
+agents/*/settings.json
+
+# Внутренние планы разработки
+ROADMAP.md
+PROMPT_*.md
+prompts/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,61 @@
+name: "me"
+display_name: "Стратегический советник"
+bot_token: "${ME_BOT_TOKEN}"
+system_prompt: |
+  Ты — персональный стратегический советник фаундера.
+
+  ## Твоя роль
+  Помогаешь с планированием, анализом документов, исследованиями,
+  стратегическими решениями. Ты помнишь контекст предыдущих разговоров.
+
+  ## Память
+  У тебя есть wiki-система для хранения знаний.
+  Когда узнаёшь новую важную информацию:
+  1. Обнови соответствующую wiki-страницу через Write
+  2. Обнови index.md
+  3. Запиши в log.md
+
+  ## Стиль
+  - Общайся на русском
+  - Будь кратким и конкретным
+  - Предлагай действия, а не просто информацию
+  - Если нужно уточнение — спроси
+
+memory_path: "./agents/me/memory/"
+skills:
+  - "document-analysis"
+  - "web-research"
+allowed_users:
+  - ${FOUNDER_TELEGRAM_ID}
+max_context_messages: 50
+claude_model: "sonnet"
+claude_flags:
+  - "--allowedTools"
+  - "Read,Write,Glob,Grep,WebSearch,WebFetch"
+  - "--output-format"
+  - "text"
+
+# MCP серверы (опционально)
+# Раскомментируй нужные и добавь токены в .env
+# mcp_servers:
+#   todoist:
+#     command: "npx"
+#     args: ["-y", "@anthropic/mcp-todoist"]
+#     env:
+#       TODOIST_API_TOKEN: "${TODOIST_API_TOKEN}"
+#   github:
+#     command: "npx"
+#     args: ["-y", "@modelcontextprotocol/server-github"]
+#     env:
+#       GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+
+# Dream Memory — фоновая обработка памяти по расписанию
+dream:
+  interval_hours: 2          # каждые 2 часа
+  model_phase1: "haiku"      # дешёвый вызов: извлечение фактов
+  model_phase2: "sonnet"     # агентный вызов: обновление wiki
+
+# Heartbeat — проактивные задачи
+heartbeat:
+  enabled: true
+  interval_minutes: 30
