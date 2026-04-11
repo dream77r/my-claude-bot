@@ -1912,10 +1912,11 @@ class TelegramBridge:
         if self.bus:
             from .bus import FleetMessage, MessageType
 
-            # Показать статус с typing keepalive
+            # Показать статус с typing keepalive и таймером
             status = StatusMessage(chat_id, context, thread_id)
             await status.show("Думаю...")
             status.start_typing()
+            status.start_thinking_timer()
             self._status_messages[chat_id] = status
 
             # Опубликовать в bus → orchestrator → agent_worker
@@ -2456,17 +2457,8 @@ class TelegramBridge:
                 thread_id = msg.metadata.get("message_thread_id")
 
                 if event == "processing_started":
-                    existing = self._status_messages.get(chat_id)
-                    if existing:
-                        # Уже есть статус из _flush_buffer — добавить таймер
-                        existing.start_thinking_timer()
-                    else:
-                        # Создать новый статус
-                        status = StatusMessage(chat_id, app, thread_id)
-                        await status.show("Думаю...")
-                        status.start_typing()
-                        status.start_thinking_timer()
-                        self._status_messages[chat_id] = status
+                    # Статус уже создан в _flush_buffer — ничего не делаем
+                    pass
 
                 elif event == "tool_use":
                     # Не показываем tool hints в чате — только таймер "Думаю..."
