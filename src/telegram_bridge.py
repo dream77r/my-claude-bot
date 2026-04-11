@@ -312,6 +312,10 @@ class StatusMessage:
                 self.message_id = None  # Больше не управляем этим сообщением
                 return True
             except Exception as e:
+                # "message is not modified" — текст уже тот же (из text_delta)
+                if "is not modified" in str(e):
+                    self.message_id = None
+                    return True
                 logger.debug(f"Finalize edit failed: {e}")
                 # Если edit не сработал — fallback на delete+send
                 await self.cleanup()
@@ -1912,6 +1916,11 @@ class TelegramBridge:
         if self.bus:
             from .bus import FleetMessage, MessageType
 
+            # Убрать предыдущий статус если остался
+            old_status = self._status_messages.pop(chat_id, None)
+            if old_status:
+                await old_status.cleanup()
+
             # Показать статус с typing keepalive и таймером
             status = StatusMessage(chat_id, context, thread_id)
             await status.show("Думаю...")
@@ -1939,6 +1948,10 @@ class TelegramBridge:
             return
 
         # ── Fallback: прямой вызов (без bus) ──
+        old_status = self._status_messages.pop(chat_id, None)
+        if old_status:
+            await old_status.cleanup()
+
         status = StatusMessage(chat_id, context, thread_id)
         await status.show("Думаю...")
         status.start_typing()
