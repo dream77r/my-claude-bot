@@ -468,6 +468,7 @@ class TelegramBridge:
         router.exact("/agents", self._cmd_agents)
         router.exact("/create_agent", self._cmd_create_agent)
         router.exact("/clone_agent", self._cmd_clone_agent)
+        router.exact("/set_access", self._cmd_set_access)
         router.exact("/stop_agent", self._cmd_stop_agent)
         router.exact("/start_agent", self._cmd_start_agent)
 
@@ -1397,6 +1398,132 @@ class TelegramBridge:
                 )
 
         return True
+
+    async def _cmd_set_access(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Управление доступом: /set_access agent_name [user_id | forward | all | lock]"""
+        if not self.fleet_runtime:
+            await self._reply(update, context, "Agent Manager недоступен.")
+            return
+
+        parts = args.strip().split(None, 1)
+        if not parts:
+            # Показать справку
+            agents = self.fleet_runtime.manager.list_agents()
+            lines = [
+                "Управление доступом к агентам.\n",
+                "Использование:",
+                "  /set_access имя_агента — показать текущий доступ",
+                "  /set_access имя_агента 123456 — добавить user ID",
+                "  /set_access имя_агента all — открыть для всех",
+                "  /set_access имя_агента lock — только владелец",
+                "  Или перешли сообщение от клиента с командой:\n"
+                "  /set_access имя_агента + переслать сообщение\n",
+            ]
+            if agents:
+                lines.append("Агенты:")
+                for a in agents:
+                    lines.append(f"  {a['name']} — {a['display_name']}")
+            await self._reply(update, context, "\n".join(lines))
+            return
+
+        agent_name = parts[0]
+        agent_yaml_path = self.fleet_runtime.root / "agents" / agent_name / "agent.yaml"
+
+        if not agent_yaml_path.exists():
+            await self._reply(update, context, f"Агент '{agent_name}' не найден.")
+            return
+
+        # Прочитать текущий конфиг
+        import yaml as _yaml
+        with open(agent_yaml_path, encoding="utf-8") as f:
+            raw = f.read()
+        config = _yaml.safe_load(raw)
+        current_users = config.get("allowed_users", [])
+
+        # Только показать текущий доступ
+        if len(parts) == 1:
+            # Проверить forwarded message
+            fwd = getattr(update.message, "forward_from", None)
+            if fwd:
+                # Добавить ID из пересланного сообщения
+                new_id = fwd.id
+                if current_users and new_id not in current_users:
+                    current_users.append(new_id)
+                    config["allowed_users"] = current_users
+                    with open(agent_yaml_path, "w", encoding="utf-8") as f:
+                        _yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+                    await self._reply(
+                        update, context,
+                        f"Добавлен доступ: {new_id} ({fwd.first_name or ''}) → '{agent_name}'\n"
+                        f"Перезапусти агента: /stop_agent {agent_name} → /start_agent {agent_name}"
+                    )
+                    return
+                elif not current_users:
+                    await self._reply(update, context, f"'{agent_name}' уже открыт для всех.")
+                    return
+                else:
+                    await self._reply(update, context, f"ID {new_id} уже в списке доступа.")
+                    return
+
+            # Просто показать
+            if not current_users:
+                access = "открытый (все могут писать)"
+            else:
+                access = "\n".join(f"  - {uid}" for uid in current_users)
+            await self._reply(
+                update, context,
+                f"Доступ к '{agent_name}':\n{access}"
+            )
+            return
+
+        action = parts[1].strip()
+
+        # Добавить user ID
+        if action.isdigit():
+            new_id = int(action)
+            if not current_users:
+                current_users = [new_id]
+            elif new_id not in current_users:
+                current_users.append(new_id)
+            else:
+                await self._reply(update, context, f"ID {new_id} уже в списке.")
+                return
+            config["allowed_users"] = current_users
+
+        # Открыть для всех
+        elif action in ("all", "все", "open"):
+            config["allowed_users"] = []
+
+        # Только владелец
+        elif action in ("lock", "закрыть", "only_me"):
+            import os
+            founder_id = os.environ.get("FOUNDER_TELEGRAM_ID", "")
+            config["allowed_users"] = [int(founder_id)] if founder_id.isdigit() else []
+
+        else:
+            await self._reply(
+                update, context,
+                f"Неизвестное действие: {action}\n"
+                "Варианты: число (ID), all, lock"
+            )
+            return
+
+        # Сохранить
+        with open(agent_yaml_path, "w", encoding="utf-8") as f:
+            _yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+        if not config["allowed_users"]:
+            result = "открытый доступ (все)"
+        else:
+            result = ", ".join(str(uid) for uid in config["allowed_users"])
+
+        await self._reply(
+            update, context,
+            f"Доступ к '{agent_name}' обновлён: {result}\n"
+            f"Перезапусти: /stop_agent {agent_name} → /start_agent {agent_name}"
+        )
 
     async def _cmd_stop_agent(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
