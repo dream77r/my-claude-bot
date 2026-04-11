@@ -1529,15 +1529,41 @@ class TelegramBridge:
                     await self._reply(update, context, f"ID {new_id} уже в списке доступа.")
                     return
 
-            # Просто показать
+            # Показать текущий доступ + ссылку на бота
             if not current_users:
                 access = "открытый (все могут писать)"
             else:
-                access = "\n".join(f"  - {uid}" for uid in current_users)
-            await self._reply(
-                update, context,
-                f"Доступ к '{agent_name}':\n{access}"
-            )
+                import os
+                founder_id = int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+                clients = [uid for uid in current_users if uid != founder_id]
+                if clients:
+                    access = "привязан к: " + ", ".join(str(uid) for uid in clients)
+                else:
+                    access = "только владелец (клиент не привязан)"
+
+            # Получить ссылку на бота
+            bot_token = config.get("bot_token", "")
+            # Раскрыть ${VAR}
+            if "${" in bot_token:
+                import os as _os
+                bot_token = _os.path.expandvars(bot_token)
+
+            link = ""
+            if bot_token and "${" not in bot_token:
+                link = await self._get_bot_invite_link(bot_token)
+
+            lines = [
+                f"Агент: {agent_name}",
+                f"Доступ: {access}",
+            ]
+            if link and not link.startswith("("):
+                lines.append(f"\nСсылка для клиента:\n{link}")
+                lines.append("Первый кто нажмёт Start — получит доступ.")
+            lines.append(f"\nКоманды:")
+            lines.append(f"  /set_access {agent_name} lock — сбросить привязку")
+            lines.append(f"  /set_access {agent_name} all — открыть для всех")
+
+            await self._reply(update, context, "\n".join(lines))
             return
 
         action = parts[1].strip()
