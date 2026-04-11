@@ -200,6 +200,146 @@ class AgentManager:
         logger.info(f"Агент '{name}' создан в {agent_dir}")
         return agent_dir
 
+    def clone_agent(
+        self,
+        source_name: str,
+        new_name: str,
+        new_display_name: str,
+        new_bot_token: str,
+        allowed_users: list[int] | None = None,
+    ) -> Path:
+        """
+        Клонировать существующего агента: SOUL.md, скиллы, настройки.
+
+        Копирует: SOUL.md, skills/, claude_model, claude_flags, dream, heartbeat.
+        НЕ копирует: memory/, bot_token, sessions.
+
+        Returns:
+            Path к созданному агенту
+        """
+        source_dir = self.agents_dir / source_name
+        if not source_dir.exists():
+            raise ValueError(f"Агент-источник '{source_name}' не найден")
+
+        new_dir = self.agents_dir / new_name
+        if new_dir.exists():
+            raise FileExistsError(f"Агент '{new_name}' уже существует")
+
+        # Валидация
+        errors = self._validate_create_params(new_name, new_bot_token, "sonnet")
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        # Прочитать конфиг источника
+        source_yaml = source_dir / "agent.yaml"
+        with open(source_yaml, encoding="utf-8") as f:
+            source_config = yaml.safe_load(f.read())
+
+        # Прочитать SOUL.md источника
+        source_soul = source_dir / "SOUL.md"
+        soul_content = ""
+        if source_soul.exists():
+            soul_content = source_soul.read_text(encoding="utf-8")
+
+        # Создать структуру директорий
+        new_dir.mkdir(parents=True)
+        (new_dir / "memory").mkdir()
+        (new_dir / "memory" / "wiki").mkdir()
+        (new_dir / "memory" / "wiki" / "entities").mkdir()
+        (new_dir / "memory" / "wiki" / "concepts").mkdir()
+        (new_dir / "memory" / "daily").mkdir()
+        (new_dir / "skills").mkdir()
+
+        # Скопировать скиллы
+        source_skills = source_dir / "skills"
+        if source_skills.exists():
+            import shutil
+            for skill_file in source_skills.glob("*.md"):
+                shutil.copy2(skill_file, new_dir / "skills" / skill_file.name)
+
+        # Скопировать шаблоны (если есть)
+        source_templates = source_dir / "templates"
+        if source_templates.exists():
+            import shutil
+            shutil.copytree(source_templates, new_dir / "templates")
+
+        # Сформировать allowed_users
+        if allowed_users is None:
+            allowed_users_yaml = "  []  # открытый доступ\n"
+        elif allowed_users:
+            lines = [f"  - {uid}\n" for uid in sorted(set(allowed_users))]
+            allowed_users_yaml = "  - ${FOUNDER_TELEGRAM_ID}\n" + "".join(lines)
+        else:
+            allowed_users_yaml = "  - ${FOUNDER_TELEGRAM_ID}\n"
+
+        # Собрать новый agent.yaml на основе источника
+        env_var = f"{new_name.upper().replace('-', '_')}_BOT_TOKEN"
+        model = source_config.get("claude_model", "sonnet")
+        flags = source_config.get("claude_flags", [])
+        dream = source_config.get("dream", {})
+        heartbeat = source_config.get("heartbeat", {})
+        skills_list = source_config.get("skills", [])
+
+        new_config = {
+            "name": new_name,
+            "display_name": new_display_name,
+            "role": "worker",
+            "bot_token": f"${{{env_var}}}",
+            "system_prompt": source_config.get("system_prompt", ""),
+            "memory_path": f"./agents/{new_name}/memory/",
+            "skills": skills_list,
+            "allowed_users": allowed_users_yaml,  # placeholder
+            "max_context_messages": source_config.get("max_context_messages", 50),
+            "claude_model": model,
+            "claude_flags": flags,
+        }
+        if dream:
+            new_config["dream"] = dream
+        if heartbeat:
+            new_config["heartbeat"] = heartbeat
+
+        # Записать agent.yaml вручную (чтобы сохранить ${} нотацию)
+        yaml_lines = [
+            f'name: "{new_name}"',
+            f'display_name: "{new_display_name}"',
+            f'role: "worker"',
+            f'bot_token: "${{{env_var}}}"',
+            f'system_prompt: |',
+        ]
+        for line in source_config.get("system_prompt", "").split("\n"):
+            yaml_lines.append(f"  {line}")
+        yaml_lines.extend([
+            f'',
+            f'memory_path: "./agents/{new_name}/memory/"',
+            f'skills: {yaml.dump(skills_list, default_flow_style=True).strip()}',
+            f'allowed_users:',
+            f'{allowed_users_yaml.rstrip()}',
+            f'max_context_messages: {source_config.get("max_context_messages", 50)}',
+            f'claude_model: "{model}"',
+        ])
+        if flags:
+            yaml_lines.append("claude_flags:")
+            for flag in flags:
+                yaml_lines.append(f'  - "{flag}"')
+        if dream:
+            yaml_lines.append("")
+            yaml_lines.append(yaml.dump({"dream": dream}, default_flow_style=False).rstrip())
+        if heartbeat:
+            yaml_lines.append("")
+            yaml_lines.append(yaml.dump({"heartbeat": heartbeat}, default_flow_style=False).rstrip())
+
+        (new_dir / "agent.yaml").write_text("\n".join(yaml_lines) + "\n", encoding="utf-8")
+
+        # Записать SOUL.md
+        if soul_content:
+            (new_dir / "SOUL.md").write_text(soul_content, encoding="utf-8")
+
+        # Добавить токен в .env
+        self._add_env_var(env_var, new_bot_token)
+
+        logger.info(f"Агент '{new_name}' клонирован из '{source_name}'")
+        return new_dir
+
     def list_agents(self) -> list[dict]:
         """
         Вернуть список агентов.

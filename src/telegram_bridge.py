@@ -72,6 +72,7 @@ BOT_COMMANDS = [
     BotCommand("stats", "Статистика использования"),
     BotCommand("agents", "Список всех агентов"),
     BotCommand("create_agent", "Создать нового агента"),
+    BotCommand("clone_agent", "Клонировать агента"),
     BotCommand("stop_agent", "Остановить агента"),
     BotCommand("start_agent", "Запустить агента"),
     BotCommand("restart", "Перезапустить платформу"),
@@ -466,6 +467,7 @@ class TelegramBridge:
         # Agent Manager commands
         router.exact("/agents", self._cmd_agents)
         router.exact("/create_agent", self._cmd_create_agent)
+        router.exact("/clone_agent", self._cmd_clone_agent)
         router.exact("/stop_agent", self._cmd_stop_agent)
         router.exact("/start_agent", self._cmd_start_agent)
 
@@ -1053,6 +1055,11 @@ class TelegramBridge:
             await self._reply(update, context, "Создание агента отменено.")
             return
 
+        # Clone wizard (шаги clone_*)
+        if state["step"].startswith("clone_"):
+            await self._clone_wizard_handle(update, context, text)
+            return
+
         step = state["step"]
         data = state["data"]
 
@@ -1243,6 +1250,153 @@ class TelegramBridge:
                 f"Агент создан, но не запустился: {msg}\n"
                 "Попробуй /start_agent " + data["name"]
             )
+
+    async def _cmd_clone_agent(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Клонировать агента: /clone_agent source_name"""
+        if not self.fleet_runtime:
+            await self._reply(update, context, "Agent Manager недоступен.")
+            return
+
+        source_name = args.strip()
+        if not source_name:
+            # Показать список доступных агентов для клонирования
+            agents = self.fleet_runtime.manager.list_agents()
+            if not agents:
+                await self._reply(update, context, "Нет агентов для клонирования.")
+                return
+            lines = ["Какого агента клонировать?\n"]
+            for a in agents:
+                lines.append(f"  /clone_agent {a['name']}  — {a['display_name']}")
+            await self._reply(update, context, "\n".join(lines))
+            return
+
+        # Проверить что источник существует
+        source_dir = self.fleet_runtime.root / "agents" / source_name
+        if not source_dir.exists():
+            await self._reply(update, context, f"Агент '{source_name}' не найден.")
+            return
+
+        # Запустить визард клонирования (сокращённый: имя, токен, доступ)
+        chat_id = update.effective_chat.id
+        self._wizard_state[chat_id] = {
+            "step": "clone_name",
+            "data": {"clone_from": source_name},
+        }
+        await self._reply(
+            update, context,
+            f"Клонирую агента '{source_name}'.\n"
+            "Скопирую: SOUL.md, скиллы, модель, настройки dream/heartbeat.\n\n"
+            "Шаг 1/4: Имя нового агента (латиницей).\n"
+            "Отправь /cancel чтобы отменить."
+        )
+
+    async def _clone_wizard_handle(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+    ) -> bool:
+        """Обработать ввод визарда клонирования. Возвращает True если обработал."""
+        chat_id = update.effective_chat.id
+        state = self._wizard_state.get(chat_id)
+        if not state or not state["step"].startswith("clone_"):
+            return False
+
+        step = state["step"]
+        data = state["data"]
+
+        if step == "clone_name":
+            name = text.strip().lower()
+            from .agent_manager import AGENT_NAME_RE
+            if not AGENT_NAME_RE.match(name):
+                await self._reply(update, context, "Имя должно быть латиницей. Попробуй ещё:")
+                return True
+            if (self.fleet_runtime.root / "agents" / name).exists():
+                await self._reply(update, context, f"'{name}' уже существует. Другое имя:")
+                return True
+            data["name"] = name
+            state["step"] = "clone_display"
+            await self._reply(
+                update, context,
+                f"Имя: {name}\n\nШаг 2/4: Отображаемое имя (на русском)."
+            )
+
+        elif step == "clone_display":
+            data["display_name"] = text.strip()
+            state["step"] = "clone_token"
+            await self._reply(
+                update, context,
+                f"Название: {data['display_name']}\n\n"
+                "Шаг 3/4: Токен бота от @BotFather."
+            )
+
+        elif step == "clone_token":
+            token = text.strip()
+            from .agent_manager import BOT_TOKEN_RE
+            if not BOT_TOKEN_RE.match(token):
+                await self._reply(update, context, "Невалидный токен. Попробуй ещё:")
+                return True
+            data["token"] = token
+            state["step"] = "clone_users"
+            await self._reply(
+                update, context,
+                "Шаг 4/4: Для кого этот агент?\n\n"
+                "- Перешли сообщение от клиента — ID автоматически\n"
+                "- Введи Telegram ID (число)\n"
+                "- 'все' — открытый доступ\n"
+                "- 'я' — только ты"
+            )
+
+        elif step == "clone_users":
+            user_ids = []
+            input_text = text.strip().lower()
+
+            if input_text in ("все", "all"):
+                data["open_access"] = True
+            elif input_text not in ("я", "me", "i"):
+                for part in text.replace(",", " ").split():
+                    if part.strip().isdigit():
+                        user_ids.append(int(part.strip()))
+                fwd = getattr(update.message, "forward_from", None)
+                if fwd:
+                    user_ids.append(fwd.id)
+
+            data["allowed_users"] = user_ids
+            self._wizard_state.pop(chat_id, None)
+
+            # Создать клон
+            try:
+                allowed = None if data.get("open_access") else (user_ids or [])
+                self.fleet_runtime.manager.clone_agent(
+                    source_name=data["clone_from"],
+                    new_name=data["name"],
+                    new_display_name=data["display_name"],
+                    new_bot_token=data["token"],
+                    allowed_users=allowed,
+                )
+            except (ValueError, FileExistsError) as e:
+                await self._reply(update, context, f"Ошибка: {e}")
+                return True
+
+            await self._reply(
+                update, context,
+                f"Агент '{data['name']}' клонирован из '{data['clone_from']}'. Запускаю..."
+            )
+
+            ok, msg = await self.fleet_runtime.start_agent(data["name"])
+            if ok:
+                await self._reply(
+                    update, context,
+                    f"Готово! '{data['display_name']}' запущен.\n"
+                    f"Найди в Telegram и напиши /start."
+                )
+            else:
+                await self._reply(
+                    update, context,
+                    f"Клонирован, но не запустился: {msg}\n"
+                    f"Попробуй /start_agent {data['name']}"
+                )
+
+        return True
 
     async def _cmd_stop_agent(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
