@@ -1033,7 +1033,7 @@ class TelegramBridge:
         await self._reply(
             update, context,
             "Создание нового агента.\n\n"
-            "Шаг 1/5: Введи имя агента (латиницей, для папки).\n"
+            "Шаг 1/6: Введи имя агента (латиницей, для папки).\n"
             "Пример: researcher, writer, support\n\n"
             "Отправь /cancel чтобы отменить."
         )
@@ -1078,7 +1078,7 @@ class TelegramBridge:
             await self._reply(
                 update, context,
                 f"Имя: {name}\n\n"
-                "Шаг 2/5: Отображаемое имя (на русском).\n"
+                "Шаг 2/6: Отображаемое имя (на русском).\n"
                 "Пример: Исследователь, Копирайтер, Поддержка"
             )
 
@@ -1088,7 +1088,7 @@ class TelegramBridge:
             await self._reply(
                 update, context,
                 f"Название: {data['display_name']}\n\n"
-                "Шаг 3/5: Токен бота от @BotFather.\n"
+                "Шаг 3/6: Токен бота от @BotFather.\n"
                 "Создай бота в Telegram через @BotFather и пришли токен."
             )
 
@@ -1107,7 +1107,7 @@ class TelegramBridge:
             state["step"] = "description"
             await self._reply(
                 update, context,
-                "Шаг 4/5: Описание роли (одно предложение).\n"
+                "Шаг 4/6: Описание роли (одно предложение).\n"
                 "Пример: AI-исследователь, помогает находить и анализировать информацию"
             )
 
@@ -1117,7 +1117,7 @@ class TelegramBridge:
             await self._reply(
                 update, context,
                 f"Роль: {data['description']}\n\n"
-                "Шаг 5/5: Модель Claude.\n"
+                "Шаг 5/6: Модель Claude.\n"
                 "Варианты: haiku (быстрая), sonnet (баланс), opus (максимум)\n"
                 "Просто напиши название или нажми Enter для sonnet."
             )
@@ -1128,6 +1128,50 @@ class TelegramBridge:
                 model = "sonnet"
             data["model"] = model
 
+            state["step"] = "users"
+            await self._reply(
+                update, context,
+                f"Модель: {model}\n\n"
+                "Шаг 6/6: Для кого этот агент?\n\n"
+                "Варианты:\n"
+                "- Перешли мне сообщение от клиента — я возьму его ID автоматически\n"
+                "- Введи Telegram ID вручную (число)\n"
+                "- Напиши 'все' — бот будет доступен всем\n"
+                "- Напиши 'я' — только для тебя"
+            )
+
+        elif step == "users":
+            user_ids = []
+            input_text = text.strip().lower()
+
+            if input_text in ("я", "me", "i"):
+                # Только текущий пользователь (owner)
+                user_ids = []  # FOUNDER подставится автоматически
+            elif input_text in ("все", "all", "любой", "everyone"):
+                user_ids = []  # Пустой список = доступ для всех
+                data["open_access"] = True
+            else:
+                # Попробовать парсить как числа (ID)
+                for part in text.replace(",", " ").split():
+                    part = part.strip()
+                    if part.isdigit():
+                        user_ids.append(int(part))
+
+                # Проверить forwarded message
+                fwd = getattr(update.message, "forward_from", None)
+                if fwd:
+                    user_ids.append(fwd.id)
+
+            data["allowed_users"] = user_ids
+
+            # Описание доступа
+            if data.get("open_access"):
+                access_desc = "все (открытый доступ)"
+            elif user_ids:
+                access_desc = f"ты + {', '.join(str(uid) for uid in user_ids)}"
+            else:
+                access_desc = "только ты"
+
             # Показать подтверждение
             state["step"] = "confirm"
             await self._reply(
@@ -1137,7 +1181,8 @@ class TelegramBridge:
                 f"  Название: {data['display_name']}\n"
                 f"  Токен: {data['token'][:10]}...\n"
                 f"  Роль: {data['description']}\n"
-                f"  Модель: {data['model']}\n\n"
+                f"  Модель: {data['model']}\n"
+                f"  Доступ: {access_desc}\n\n"
                 "Создать? (да/нет)"
             )
 
@@ -1162,12 +1207,18 @@ class TelegramBridge:
         chat_id = update.effective_chat.id
 
         try:
+            # Если открытый доступ — пустой allowed_users в yaml
+            allowed_users = data.get("allowed_users", []) or None
+            if data.get("open_access"):
+                allowed_users = None  # Пустой список = все могут
+
             self.fleet_runtime.manager.create_agent(
                 name=data["name"],
                 display_name=data["display_name"],
                 bot_token=data["token"],
                 description=data["description"],
                 model=data["model"],
+                allowed_users=allowed_users,
             )
         except (ValueError, FileExistsError) as e:
             await self._reply(update, context, f"Ошибка: {e}")

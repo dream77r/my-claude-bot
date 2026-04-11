@@ -36,8 +36,7 @@ system_prompt: |
 memory_path: "./agents/{name}/memory/"
 skills: []
 allowed_users:
-  - ${{FOUNDER_TELEGRAM_ID}}
-max_context_messages: 50
+{allowed_users_yaml}max_context_messages: 50
 claude_model: "{model}"
 claude_flags:
   - "--allowedTools"
@@ -120,6 +119,7 @@ class AgentManager:
         description: str,
         model: str = "sonnet",
         soul_md: str | None = None,
+        allowed_users: list[int] | None = None,
     ) -> Path:
         """
         Создать всю структуру агента + записать токен в .env.
@@ -131,6 +131,7 @@ class AgentManager:
             description: описание роли (одно предложение)
             model: модель Claude (haiku/sonnet/opus)
             soul_md: кастомный SOUL.md (если None — используется шаблон)
+            allowed_users: список Telegram user ID (если None — только FOUNDER)
 
         Returns:
             Path к созданной директории агента
@@ -160,6 +161,18 @@ class AgentManager:
         # Имя переменной окружения
         env_var = f"{name.upper().replace('-', '_')}_BOT_TOKEN"
 
+        # Сформировать allowed_users
+        if allowed_users is None:
+            # None = открытый доступ (пустой список = все могут)
+            allowed_users_yaml = "  []  # открытый доступ\n"
+        elif allowed_users:
+            # FOUNDER + переданные пользователи
+            lines = [f"  - {uid}\n" for uid in sorted(set(allowed_users))]
+            allowed_users_yaml = "  - ${FOUNDER_TELEGRAM_ID}\n" + "".join(lines)
+        else:
+            # Пустой список = только FOUNDER
+            allowed_users_yaml = "  - ${FOUNDER_TELEGRAM_ID}\n"
+
         # Записать agent.yaml
         yaml_content = AGENT_YAML_TEMPLATE.format(
             name=name,
@@ -167,6 +180,7 @@ class AgentManager:
             description=description,
             model=model,
             env_var=env_var,
+            allowed_users_yaml=allowed_users_yaml,
         )
         (agent_dir / "agent.yaml").write_text(yaml_content, encoding="utf-8")
 
