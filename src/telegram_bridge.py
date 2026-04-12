@@ -1952,14 +1952,25 @@ class TelegramBridge:
                 mem_note = (
                     f"\n    требует память: {', '.join(s.requires_memory)}"
                 )
+
+            # Маркеры типа и скриптов перед именем
+            type_mark = "📦" if s.type == "bundle" else "📄"
+            scripts_mark = " ⚠️ скрипты" if s.has_scripts else ""
+
             lines.append(
-                f"• *{s.name}* v{s.version} — {s.description}{mem_note}"
+                f"• {type_mark} *{s.name}* v{s.version}{scripts_mark} — "
+                f"{s.description}{mem_note}"
             )
             if tags:
                 lines.append(f"    {tags}")
+
+        # Легенда для пользователя
         lines.append(
-            f"\nВсего: {len(skills)}\n"
-            f"Установить: /installskill <имя> [@agent]"
+            f"\nВсего: {len(skills)}"
+            f"\n📄 — single-file скилл (только markdown)"
+            f"\n📦 — bundle (директория с доп. файлами)"
+            f"\n⚠️ скрипты — содержит исполняемый код (Python/Bash/JS)"
+            f"\n\nУстановить: /installskill <имя> [@agent]"
         )
         await self._reply(update, context, "\n".join(lines))
 
