@@ -37,6 +37,10 @@ skills:
   - "task-tracking"
   - "knowledge-base"
   - "research"
+  - "chat-memory"
+  - "daily-sync"
+  - "reminders"
+  - "promise-tracking"
 
 # Пустой список = доступ всем (в группе доступ контролируется самой группой)
 allowed_users: []
@@ -63,3 +67,23 @@ skill_advisor:
 
 heartbeat:
   enabled: false
+
+# Cron-задачи (декларативно). Единственный job schedule_check запускается
+# каждые 5 минут и сам решает, что делать в каждой группе, читая
+# groups/{chat_id}/settings.json. Это позволяет держать всю логику
+# расписания в файлах памяти, без хардкода в agent.yaml.
+cron:
+  - name: "schedule_check"
+    schedule: "*/5 * * * *"
+    prompt: |
+      Прочитай templates/schedule_check.md и выполни инструкции из него.
+      Рабочая директория — memory/ агента team. Все пути относительно неё.
+    model: "sonnet"
+    notify: false
+    allowed_tools:
+      - "Read"
+      - "Write"
+      - "Edit"
+      - "Glob"
+      - "Grep"
+      - "Bash"
