@@ -383,14 +383,14 @@ class StatusMessage:
             self._thinking_timer_task = None
 
     async def _thinking_timer_loop(self) -> None:
-        """Цикл обновления 'Думаю... (1с)', '(2с)' и т.д."""
+        """Цикл обновления 'Думаю... (10с)', '(20с)' и т.д."""
         try:
             while True:
-                await asyncio.sleep(1)
+                await asyncio.sleep(10)
                 if self._thinking_start is None:
                     break
                 elapsed = int(time.monotonic() - self._thinking_start)
-                await self._do_edit(f"Думаю... ({elapsed}с)")
+                await self._do_edit(f"💬 Думаю... ({elapsed}с)")
         except asyncio.CancelledError:
             pass
 
@@ -1921,13 +1921,11 @@ class TelegramBridge:
             if old_status:
                 await old_status.cleanup()
 
-            # Master-агент: сообщение создастся при первом tool hint
-            # Worker-агент: показываем "Думаю..." и запускаем таймер
+            # Показать статус с таймером — первый tool hint заменит его (master)
             status = StatusMessage(chat_id, context, thread_id)
+            await status.show("💬 Думаю...")
             status.start_typing()
-            if not self.agent.is_master:
-                await status.show("Думаю...")
-                status.start_thinking_timer()
+            status.start_thinking_timer()
             self._status_messages[chat_id] = status
 
             # Опубликовать в bus → orchestrator → agent_worker
@@ -1955,10 +1953,9 @@ class TelegramBridge:
             await old_status.cleanup()
 
         status = StatusMessage(chat_id, context, thread_id)
+        await status.show("💬 Думаю...")
         status.start_typing()
-        if not self.agent.is_master:
-            await status.show("Думаю...")
-            status.start_thinking_timer()
+        status.start_thinking_timer()
 
         task = asyncio.current_task()
         self._active_tasks[chat_id] = task
@@ -1971,6 +1968,7 @@ class TelegramBridge:
         async def _on_tool_use(hint: str) -> None:
             # Master-агент показывает tool hints, worker — нет
             if self.agent.is_master:
+                status.stop_thinking_timer()
                 await status.show(f"⏳ {hint}")
 
         try:
@@ -2487,6 +2485,7 @@ class TelegramBridge:
                     if self.agent.is_master:
                         status = self._status_messages.get(chat_id)
                         if status:
+                            status.stop_thinking_timer()
                             await status.show(f"⏳ {msg.content}")
 
                 elif event == "text_delta":
