@@ -2,7 +2,32 @@
 
 [🇷🇺 Русская версия](README.ru.md)
 
-Multi-agent Telegram platform powered by Claude Agent SDK. A fleet of AI agents with a shared message bus, a 3-level knowledge graph, self-improving advisors, a community skill marketplace, background memory processing, and MCP integrations. Runs on a Claude Pro subscription ($20/mo, unlimited), not through the API.
+**What it is in 5 sentences.** My Claude Bot turns your $20/month Claude Pro subscription into a fleet of AI Telegram agents — strategic advisor, coder, team hub, and document archivist out of the box, plus unlimited custom agents, each as a separate Telegram bot with its own personality and memory. Agents share a MessageBus, remember everything in git-versioned wiki memory, and self-improve overnight via Dream cycles that analyse usage and propose new skills or schema changes. Works in personal chats and groups, handles files and voice messages, installs community skills from a shared marketplace, and runs unattended on any cheap VPS. No API bills, no per-call charges — install with one command, update with one command. If you want a persistent personal AI team that costs $20/month total and lives inside Telegram where you already are, this is for you.
+
+```
+          Telegram  (DMs + group chats + forum topics)
+       ┌──────┬────────┬───────┬────────────┬──────────┐
+       │      │        │       │            │          │
+       ▼      ▼        ▼       ▼            ▼          ▼
+      me    coder    team   archivist    custom…    custom…
+    (master) (dev)  (group)  (docs)      (your own agents)
+       │      │        │       │            │          │
+       └──────┴────────┴───────┴────────────┴──────────┘
+                             │
+                   MessageBus + Orchestrator
+                     (delegation, routing)
+                             │
+           ┌─────────────────┼──────────────────┐
+           │                 │                  │
+     ┌─────▼──────┐   ┌──────▼──────┐   ┌───────▼───────┐
+     │ Claude Pro │   │ Wiki memory │   │   Skills +    │
+     │  $20 / mo  │   │ per agent,  │   │ community Pool│
+     │ (unlimited)│   │ git-backed  │   │  marketplace  │
+     └────────────┘   └─────────────┘   └───────────────┘
+
+    Background: Dream (4 phases) · Knowledge Graph · Smart Heartbeat · Cron
+                SkillAdvisor / SchemaAdvisor · Consolidator · Sandbox
+```
 
 ## Features
 
