@@ -2032,12 +2032,20 @@ class TelegramBridge:
 
         msg_lines = [
             f"Скилл '{skill_name}' установлен агенту '{target_name}'.",
-            f"Файл: {result.installed_to}",
+            f"Путь: {result.installed_to}",
         ]
+
+        if result.has_scripts:
+            msg_lines.append(
+                "\n⚠️ Скилл содержит исполняемые скрипты (Python/Bash/JS). "
+                "Они скопированы вместе со скиллом и могут запускаться "
+                "Claude Agent SDK по запросу. Убедись что доверяешь автору "
+                "перед реальным использованием."
+            )
+
         if result.missing_memory:
             msg_lines.append(
-                f"\nВнимание: скилл декларирует файлы памяти, "
-                f"которых пока нет у агента:\n"
+                f"\nСкилл декларирует файлы памяти, которых пока нет у агента:\n"
                 + "\n".join(f"  - {m}" for m in result.missing_memory)
                 + "\n\nСкилл будет работать, но пока не сможет читать из них. "
                   "Создай эти файлы через обычный диалог с агентом — "
@@ -2748,8 +2756,12 @@ class TelegramBridge:
                     )
 
                 elif msg.msg_type.value == "outbound" and not event:
-                    # Generic outbound (например heartbeat notification)
-                    await self._send_via_bot(app, chat_id, msg.content)
+                    # Generic outbound (cron/heartbeat/dispatcher notifications).
+                    # thread_id читаем из metadata, чтобы сообщение попало
+                    # в нужный топик, а не в главный тред группы.
+                    await self._send_via_bot(
+                        app, chat_id, msg.content, thread_id
+                    )
 
             except asyncio.CancelledError:
                 logger.info(f"Bus listener '{queue_name}' остановлен")

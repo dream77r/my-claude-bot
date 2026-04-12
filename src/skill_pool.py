@@ -43,31 +43,60 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SkillCatalogEntry:
-    """Один скилл в manifest.json."""
+    """
+    Один скилл в manifest.json.
+
+    Поддерживает два формата:
+    - Single-file (legacy): поле `file` указывает на published/{skill}.md
+    - Bundle (agentskills.io): поле `path` указывает на published/{skill}/
+      директорию, в которой лежит SKILL.md и опциональные scripts/, references/,
+      assets/ (вся директория копируется при установке)
+    """
 
     name: str
-    file: str  # относительный путь в репо, напр. "published/web-research.md"
     title: str
     description: str
     version: str
+    # Один из двух должен быть задан:
+    file: str = ""          # legacy: относительный путь к .md
+    path: str = ""          # bundle: относительный путь к директории
+    type: str = "single"    # "single" | "bundle"
     tags: list[str] = field(default_factory=list)
     requires_memory: list[str] = field(default_factory=list)
+    has_scripts: bool = False  # true если в bundle есть .py/.sh/.js/etc
     author: str = ""
     created: str = ""
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "SkillCatalogEntry":
+        # Автоопределение типа: если задан path → bundle, иначе single
+        entry_type = data.get("type")
+        if not entry_type:
+            entry_type = "bundle" if data.get("path") else "single"
+
         return cls(
             name=name,
             file=data.get("file", ""),
+            path=data.get("path", ""),
+            type=entry_type,
             title=data.get("title", name),
             description=data.get("description", ""),
             version=data.get("version", "0.0.0"),
             tags=list(data.get("tags") or []),
             requires_memory=list(data.get("requires_memory") or []),
+            has_scripts=bool(data.get("has_scripts", False)),
             author=data.get("author", ""),
             created=data.get("created", ""),
         )
+
+    def source_rel_path(self) -> str:
+        """
+        Вернуть относительный путь к скиллу в пуле (для bundle — папка,
+        для single — файл). Bundle имеет приоритет если оба заданы.
+        """
+        if self.type == "bundle" and self.path:
+            return self.path
+        return self.file
 
 
 @dataclass
@@ -78,6 +107,7 @@ class InstallResult:
     skill_name: str
     installed_to: str = ""
     missing_memory: list[str] = field(default_factory=list)
+    has_scripts: bool = False
     error: str = ""
 
 
@@ -227,27 +257,76 @@ class SkillPool:
                 return entry
         return None
 
-    def read_skill_body(self, entry: SkillCatalogEntry) -> str:
+    # Расширения файлов, считающиеся "исполняемыми" — триггер warning при install
+    EXECUTABLE_EXTENSIONS = frozenset({
+        ".py", ".sh", ".bash", ".zsh",
+        ".js", ".mjs", ".cjs", ".ts", ".tsx",
+        ".rb", ".pl", ".php", ".lua",
+    })
+
+    @classmethod
+    def has_executable_scripts(cls, path: Path) -> bool:
         """
-        Прочитать полный текст файла скилла (frontmatter + тело).
+        Проверить есть ли в директории исполняемые скрипты.
+
+        Рекурсивно обходит директорию и ищет файлы с расширениями из
+        EXECUTABLE_EXTENSIONS. Используется для предупреждения пользователя
+        при установке bundle-скиллов со скриптами.
 
         Args:
-            entry: запись из каталога
+            path: путь к директории (если не директория — возвращается False)
 
-        Raises:
-            SkillPoolError если файл отсутствует или не в published/
+        Returns:
+            True если найден хотя бы один файл с исполняемым расширением
         """
-        if not entry.file.startswith("published/"):
+        if not path.is_dir():
+            return False
+        for item in path.rglob("*"):
+            if item.is_file() and item.suffix.lower() in cls.EXECUTABLE_EXTENSIONS:
+                return True
+        return False
+
+    def _resolve_source_path(self, entry: SkillCatalogEntry) -> Path:
+        """
+        Получить абсолютный путь к источнику скилла в пуле.
+
+        Для bundle это директория, для single — файл.
+        Валидирует что путь внутри published/.
+        """
+        rel = entry.source_rel_path()
+        if not rel:
+            raise SkillPoolError(
+                f"Скилл '{entry.name}' не имеет ни file ни path в manifest.json"
+            )
+        if not rel.startswith("published/"):
             raise SkillPoolError(
                 f"Скилл '{entry.name}' не в published/, установка запрещена "
-                f"(файл: {entry.file})"
+                f"(путь: {rel})"
             )
-        skill_path = self.repo_dir / entry.file
-        if not skill_path.exists():
-            raise SkillPoolError(
-                f"Файл скилла не найден: {skill_path}"
-            )
-        return skill_path.read_text(encoding="utf-8")
+        source = self.repo_dir / rel
+        if not source.exists():
+            raise SkillPoolError(f"Источник скилла не найден: {source}")
+        return source
+
+    def read_skill_body(self, entry: SkillCatalogEntry) -> str:
+        """
+        Прочитать основной файл скилла (frontmatter + тело).
+
+        Для single-скилла — содержимое .md файла.
+        Для bundle — содержимое {dir}/SKILL.md.
+
+        Raises:
+            SkillPoolError если путь невалиден или файл отсутствует
+        """
+        source = self._resolve_source_path(entry)
+        if source.is_dir():
+            skill_md = source / "SKILL.md"
+            if not skill_md.exists():
+                raise SkillPoolError(
+                    f"Bundle '{entry.name}' не содержит SKILL.md: {source}"
+                )
+            return skill_md.read_text(encoding="utf-8")
+        return source.read_text(encoding="utf-8")
 
     def check_memory_for_skill(
         self, entry: SkillCatalogEntry, agent_memory_path: Path
@@ -279,21 +358,26 @@ class SkillPool:
         """
         Установить скилл из пула в агента.
 
+        Поддерживает два формата:
+        - Single: копирует .md файл в agents/{name}/skills/{skill}.md
+        - Bundle: копирует всю директорию в agents/{name}/skills/{skill}/
+
         Порядок действий:
         1. Найти скилл в каталоге
-        2. Прочитать содержимое файла
-        3. Проверить requires_memory (если strict_memory=True — отказ при отсутствии)
-        4. Скопировать файл в agents/{name}/skills/{skill_name}.md
-        5. Вернуть InstallResult с информацией об отсутствующей памяти
+        2. Определить источник (файл или директория)
+        3. Проверить requires_memory (strict → отказ; soft → warning)
+        4. Проверить наличие скриптов в bundle → выставить has_scripts
+        5. Скопировать файл/директорию в агента
+        6. Вернуть InstallResult
 
         Args:
             skill_name: имя скилла в каталоге
             agent_dir: корневая директория агента (содержит skills/, memory/)
-            overwrite: перезаписать существующий файл? (default False)
+            overwrite: перезаписать существующее? (default False)
             strict_memory: если True, отсутствующие файлы памяти => ошибка
 
         Returns:
-            InstallResult с ok, installed_to, missing_memory, error
+            InstallResult с ok, installed_to, missing_memory, has_scripts, error
         """
         entry = self.get_skill(skill_name)
         if entry is None:
@@ -303,15 +387,28 @@ class SkillPool:
             )
 
         try:
-            body = self.read_skill_body(entry)
+            source = self._resolve_source_path(entry)
         except SkillPoolError as e:
             return InstallResult(
                 ok=False, skill_name=skill_name, error=str(e)
             )
 
+        is_bundle = source.is_dir()
+
+        # Валидация bundle: обязательный SKILL.md
+        if is_bundle and not (source / "SKILL.md").exists():
+            return InstallResult(
+                ok=False, skill_name=skill_name,
+                error=f"Bundle '{entry.name}' не содержит SKILL.md"
+            )
+
         skills_dir = agent_dir / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
-        target = skills_dir / f"{entry.name}.md"
+
+        if is_bundle:
+            target = skills_dir / entry.name
+        else:
+            target = skills_dir / f"{entry.name}.md"
 
         if target.exists() and not overwrite:
             return InstallResult(
@@ -337,32 +434,61 @@ class SkillPool:
                 ),
             )
 
+        # Проверка скриптов (для предупреждения пользователя)
+        has_scripts = False
+        if is_bundle:
+            has_scripts = self.has_executable_scripts(source)
+
         # Копирование
-        target.write_text(body, encoding="utf-8")
-        logger.info(
-            f"Установлен скилл '{entry.name}' v{entry.version} в {target}"
-        )
+        if is_bundle:
+            if target.exists() and overwrite:
+                shutil.rmtree(target)
+            shutil.copytree(source, target)
+            logger.info(
+                f"Установлен bundle '{entry.name}' v{entry.version} в {target}"
+                + (f" (с исполняемыми скриптами)" if has_scripts else "")
+            )
+        else:
+            body = source.read_text(encoding="utf-8")
+            target.write_text(body, encoding="utf-8")
+            logger.info(
+                f"Установлен скилл '{entry.name}' v{entry.version} в {target}"
+            )
 
         return InstallResult(
             ok=True,
             skill_name=skill_name,
             installed_to=str(target),
             missing_memory=missing_memory,
+            has_scripts=has_scripts,
         )
 
     def uninstall_skill(self, skill_name: str, agent_dir: Path) -> bool:
         """
-        Удалить скилл из агента (только файл, память не трогаем).
+        Удалить скилл из агента. Работает с обоими форматами (file и bundle).
+
+        Память агента не трогается — только скилл.
 
         Returns:
             True если скилл был установлен и удалён
         """
-        target = agent_dir / "skills" / f"{skill_name}.md"
-        if not target.exists():
-            return False
-        target.unlink()
-        logger.info(f"Удалён скилл '{skill_name}' у агента {agent_dir.name}")
-        return True
+        skills_dir = agent_dir / "skills"
+
+        # Сначала bundle (директория)
+        bundle_target = skills_dir / skill_name
+        if bundle_target.exists() and bundle_target.is_dir():
+            shutil.rmtree(bundle_target)
+            logger.info(f"Удалён bundle '{skill_name}' у агента {agent_dir.name}")
+            return True
+
+        # Потом single-file
+        file_target = skills_dir / f"{skill_name}.md"
+        if file_target.exists() and file_target.is_file():
+            file_target.unlink()
+            logger.info(f"Удалён скилл '{skill_name}' у агента {agent_dir.name}")
+            return True
+
+        return False
 
 
 def make_pool_from_env(project_root: Path) -> SkillPool | None:

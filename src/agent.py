@@ -281,11 +281,50 @@ class Agent:
                 missing.append(rel)
         return missing
 
+    @staticmethod
+    def _discover_skill_sources(skills_dir: Path) -> list[tuple[str, Path]]:
+        """
+        Найти все источники скиллов в директории агента.
+
+        Поддерживает два формата (agentskills.io):
+        - Single-file: skills/{name}.md
+        - Bundle: skills/{name}/SKILL.md (директория с SKILL.md и sibling файлами)
+
+        Returns:
+            Список (skill_name, path_to_md_file), отсортированный по имени.
+            Для single-file path_to_md_file — сам .md файл.
+            Для bundle — путь к SKILL.md внутри директории.
+        """
+        if not skills_dir.exists():
+            return []
+
+        found: dict[str, Path] = {}
+
+        # Single-file скиллы: skills/*.md
+        for item in skills_dir.glob("*.md"):
+            if item.is_file():
+                found[item.stem] = item
+
+        # Bundle-скиллы: skills/*/SKILL.md
+        for item in skills_dir.iterdir():
+            if not item.is_dir():
+                continue
+            skill_md = item / "SKILL.md"
+            if skill_md.exists() and skill_md.is_file():
+                # Bundle имеет приоритет над .md файлом с тем же именем
+                found[item.name] = skill_md
+
+        return sorted(found.items())
+
     def _load_skills(self, user_message: str | None = None) -> str:
         """
-        Загрузить скиллы из agents/{name}/skills/*.md.
+        Загрузить скиллы из agents/{name}/skills/.
 
-        Поддерживает YAML frontmatter (agentskills.io-совместимый):
+        Поддерживает два формата источников (agentskills.io-совместимые):
+        - Single-file: skills/{name}.md
+        - Bundle: skills/{name}/SKILL.md + опц. scripts/, references/, assets/
+
+        YAML frontmatter поля:
         - name, version, description, license, when_to_use, tags
         - triggers: {keywords, file_extensions} — для progressive disclosure
         - requires_memory: список файлов памяти (мягкая проверка)
@@ -311,10 +350,9 @@ class Agent:
 
         eligible: list[tuple[str, dict | None, str]] = []  # (name, meta, body)
 
-        for skill_file in sorted(skills_dir.glob("*.md")):
-            raw = skill_file.read_text(encoding="utf-8")
+        for skill_name, skill_md_path in self._discover_skill_sources(skills_dir):
+            raw = skill_md_path.read_text(encoding="utf-8")
             meta, body = self.parse_skill_frontmatter(raw)
-            skill_name = skill_file.stem
 
             # Фильтрация: если не always и не в списке skills из yaml — пропустить
             if meta and not meta.get("always", False):

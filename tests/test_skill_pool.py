@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from src.skill_pool import (
     InstallResult,
@@ -511,6 +512,326 @@ class TestExtractSkillMetadata:
 
 
 # ───────────────────── Git integration (skipped by default) ─
+
+
+class TestHasExecutableScripts:
+    """Детектор исполняемых скриптов внутри bundle."""
+
+    def test_empty_dir_false(self, tmp_path):
+        d = tmp_path / "empty"
+        d.mkdir()
+        assert SkillPool.has_executable_scripts(d) is False
+
+    def test_file_not_dir_false(self, tmp_path):
+        f = tmp_path / "x.md"
+        f.write_text("hi")
+        assert SkillPool.has_executable_scripts(f) is False
+
+    def test_only_md_files_false(self, tmp_path):
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text("body")
+        (d / "README.md").write_text("readme")
+        assert SkillPool.has_executable_scripts(d) is False
+
+    def test_python_script_true(self, tmp_path):
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text("body")
+        (d / "scripts").mkdir()
+        (d / "scripts" / "sync.py").write_text("print('x')")
+        assert SkillPool.has_executable_scripts(d) is True
+
+    def test_bash_script_true(self, tmp_path):
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "run.sh").write_text("#!/bin/bash")
+        assert SkillPool.has_executable_scripts(d) is True
+
+    def test_typescript_true(self, tmp_path):
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "x.ts").write_text("")
+        assert SkillPool.has_executable_scripts(d) is True
+
+    def test_nested_script_true(self, tmp_path):
+        d = tmp_path / "skill"
+        (d / "lib" / "utils").mkdir(parents=True)
+        (d / "lib" / "utils" / "helper.js").write_text("")
+        assert SkillPool.has_executable_scripts(d) is True
+
+
+def make_fake_pool_with_bundle(tmp_path: Path) -> Path:
+    """
+    Создать фейковый пул с одним single-file скиллом и одним bundle скиллом.
+    """
+    pool_repo = tmp_path / "pool" / "my-claude-bot-skills"
+    pool_repo.mkdir(parents=True)
+    (pool_repo / "published").mkdir()
+
+    # Single-file скилл (как в существующих тестах)
+    (pool_repo / "published" / "simple.md").write_text(
+        "---\n"
+        "name: simple\n"
+        "version: 1.0.0\n"
+        'description: "Простой скилл"\n'
+        "---\n"
+        "# Simple\nТело простого скилла.\n",
+        encoding="utf-8",
+    )
+
+    # Bundle скилл без скриптов
+    bundle1 = pool_repo / "published" / "coach"
+    bundle1.mkdir()
+    (bundle1 / "SKILL.md").write_text(
+        "---\n"
+        "name: coach\n"
+        "version: 1.0.0\n"
+        'description: "Триатлонный тренер"\n'
+        "---\n"
+        "# Coach\nОсновная инструкция тренера.\n",
+        encoding="utf-8",
+    )
+    (bundle1 / "reference").mkdir()
+    (bundle1 / "reference" / "zones.md").write_text("# Zones\nТренировочные зоны")
+
+    # Bundle скилл со скриптами
+    bundle2 = pool_repo / "published" / "garmin"
+    bundle2.mkdir()
+    (bundle2 / "SKILL.md").write_text(
+        "---\n"
+        "name: garmin\n"
+        "version: 2.0.0\n"
+        'description: "Garmin sync"\n'
+        "---\n"
+        "# Garmin\nСинхронизация данных Garmin.\n",
+        encoding="utf-8",
+    )
+    (bundle2 / "scripts").mkdir()
+    (bundle2 / "scripts" / "sync.py").write_text("print('syncing')")
+
+    manifest = {
+        "version": "1.0",
+        "skills": {
+            "simple": {
+                "file": "published/simple.md",
+                "title": "Simple",
+                "description": "Простой скилл",
+                "version": "1.0.0",
+                "tags": [],
+                "requires_memory": [],
+            },
+            "coach": {
+                "path": "published/coach",
+                "type": "bundle",
+                "title": "Triathlon Coach",
+                "description": "Триатлонный тренер",
+                "version": "1.0.0",
+                "tags": ["sport"],
+                "requires_memory": [],
+                "has_scripts": False,
+            },
+            "garmin": {
+                "path": "published/garmin",
+                "type": "bundle",
+                "title": "Garmin Sync",
+                "description": "Синхронизация Garmin Connect",
+                "version": "2.0.0",
+                "tags": ["sport", "garmin"],
+                "requires_memory": [],
+                "has_scripts": True,
+            },
+        },
+    }
+    (pool_repo / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return pool_repo
+
+
+class TestBundleSkills:
+    """Тесты для bundle-формата (agentskills.io directory layout)."""
+
+    def test_catalog_entry_detects_bundle_type(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+
+        simple = pool.get_skill("simple")
+        coach = pool.get_skill("coach")
+        garmin = pool.get_skill("garmin")
+
+        assert simple.type == "single"
+        assert coach.type == "bundle"
+        assert garmin.type == "bundle"
+        assert coach.has_scripts is False
+        assert garmin.has_scripts is True
+
+    def test_source_rel_path_prefers_path_for_bundle(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        assert pool.get_skill("simple").source_rel_path() == "published/simple.md"
+        assert pool.get_skill("coach").source_rel_path() == "published/coach"
+        assert pool.get_skill("garmin").source_rel_path() == "published/garmin"
+
+    def test_read_skill_body_from_bundle(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        body = pool.read_skill_body(pool.get_skill("coach"))
+        assert "Coach" in body
+        assert "Основная инструкция тренера" in body
+
+    def test_read_skill_body_rejects_bundle_without_skill_md(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        # Удаляем SKILL.md у coach
+        (fake / "published" / "coach" / "SKILL.md").unlink()
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        with pytest.raises(SkillPoolError, match="SKILL.md"):
+            pool.read_skill_body(pool.get_skill("coach"))
+
+    def test_install_bundle_copies_entire_directory(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        agent_dir = make_agent_dir(tmp_path)
+
+        result = pool.install_skill("coach", agent_dir)
+
+        assert result.ok is True
+        assert result.has_scripts is False
+        target = agent_dir / "skills" / "coach"
+        assert target.is_dir()
+        assert (target / "SKILL.md").exists()
+        assert (target / "reference" / "zones.md").exists()
+
+    def test_install_bundle_with_scripts_flags_has_scripts(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        agent_dir = make_agent_dir(tmp_path)
+
+        result = pool.install_skill("garmin", agent_dir)
+
+        assert result.ok is True
+        assert result.has_scripts is True
+        target = agent_dir / "skills" / "garmin"
+        assert (target / "scripts" / "sync.py").exists()
+
+    def test_install_single_still_works(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        agent_dir = make_agent_dir(tmp_path)
+
+        result = pool.install_skill("simple", agent_dir)
+
+        assert result.ok is True
+        assert result.has_scripts is False
+        target = agent_dir / "skills" / "simple.md"
+        assert target.is_file()
+
+    def test_install_bundle_overwrite_replaces(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        agent_dir = make_agent_dir(tmp_path)
+
+        pool.install_skill("coach", agent_dir)
+        # Добавляем мусорный файл в установленный bundle
+        (agent_dir / "skills" / "coach" / "junk.txt").write_text("junk")
+
+        result = pool.install_skill("coach", agent_dir, overwrite=True)
+        assert result.ok is True
+        # Мусорный файл должен исчезнуть после rmtree+copytree
+        assert not (agent_dir / "skills" / "coach" / "junk.txt").exists()
+
+    def test_install_bundle_no_overwrite_fails(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        agent_dir = make_agent_dir(tmp_path)
+
+        pool.install_skill("coach", agent_dir)
+        result = pool.install_skill("coach", agent_dir)
+        assert result.ok is False
+        assert "уже установлен" in result.error
+
+    def test_uninstall_bundle(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        agent_dir = make_agent_dir(tmp_path)
+
+        pool.install_skill("coach", agent_dir)
+        assert (agent_dir / "skills" / "coach").is_dir()
+
+        ok = pool.uninstall_skill("coach", agent_dir)
+        assert ok is True
+        assert not (agent_dir / "skills" / "coach").exists()
+
+    def test_uninstall_single_still_works(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        agent_dir = make_agent_dir(tmp_path)
+
+        pool.install_skill("simple", agent_dir)
+        ok = pool.uninstall_skill("simple", agent_dir)
+        assert ok is True
+        assert not (agent_dir / "skills" / "simple.md").exists()
+
+    def test_reject_non_published_path(self, tmp_path):
+        fake = make_fake_pool_with_bundle(tmp_path)
+        pool = make_pool_pointing_to_fake(tmp_path, fake)
+        # Подделка: entry указывает на incoming/
+        bad = SkillCatalogEntry(
+            name="bad", path="incoming/bad", type="bundle",
+            title="", description="", version="0.1.0",
+        )
+        with pytest.raises(SkillPoolError, match="не в published"):
+            pool._resolve_source_path(bad)
+
+    def test_bundle_agent_load_skill_finds_bundle(self, tmp_path):
+        """Integration: Agent._load_skills находит и bundle и single file."""
+        from src.agent import Agent
+        agent_dir = make_agent_dir(tmp_path)
+
+        # Создаём agent.yaml
+        config = {
+            "name": "test",
+            "bot_token": "123:ABC",
+            "skills": ["single-skill", "bundle-skill"],
+        }
+        yaml_path = agent_dir / "agent.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(config, f)
+
+        skills_dir = agent_dir / "skills"
+
+        # Single-file скилл
+        (skills_dir / "single-skill.md").write_text(
+            "---\n"
+            "name: single-skill\n"
+            'description: "Single"\n'
+            "always: true\n"
+            "---\n"
+            "# Single Body\n",
+            encoding="utf-8",
+        )
+
+        # Bundle скилл
+        bundle = skills_dir / "bundle-skill"
+        bundle.mkdir()
+        (bundle / "SKILL.md").write_text(
+            "---\n"
+            "name: bundle-skill\n"
+            'description: "Bundle"\n'
+            "always: true\n"
+            "---\n"
+            "# Bundle Body\n",
+            encoding="utf-8",
+        )
+        (bundle / "references").mkdir()
+        (bundle / "references" / "extra.md").write_text("Extra content")
+
+        agent = Agent(str(yaml_path))
+        prompt = agent._load_skills()
+
+        assert "Single Body" in prompt
+        assert "Bundle Body" in prompt
 
 
 @pytest.mark.skipif(

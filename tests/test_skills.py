@@ -480,10 +480,14 @@ class TestAgentSkillsIoFormat:
             assert isinstance(triggers, dict), (
                 f"{skill_file.name}: triggers не dict"
             )
+            # always=true скиллы не нуждаются в триггерах —
+            # они грузятся полным телом в каждую сессию
+            if meta.get("always", False):
+                continue
             keywords = triggers.get("keywords") or []
             extensions = triggers.get("file_extensions") or []
             assert len(keywords) + len(extensions) > 0, (
                 f"{skill_file.name}: triggers пустые (нет ни keywords ни "
                 f"file_extensions) — progressive disclosure не сможет "
-                f"активировать скилл"
+                f"активировать скилл. Если скилл always=true, это ок."
             )

@@ -214,6 +214,14 @@ def cmd_pool_install(root: Path, skill_name: str, agent_name: str) -> None:
         sys.exit(1)
 
     print(f"✓ Скилл '{skill_name}' установлен в {result.installed_to}")
+    if result.has_scripts:
+        print(
+            "  ⚠️  Скилл содержит исполняемые скрипты (Python/Bash/JS)."
+        )
+        print(
+            "  Они скопированы и могут запускаться Claude Agent SDK "
+            "по запросу."
+        )
     if result.missing_memory:
         print(
             f"  Внимание: отсутствуют файлы памяти: "
