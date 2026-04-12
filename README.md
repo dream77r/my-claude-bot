@@ -2,23 +2,33 @@
 
 [🇷🇺 Русская версия](README.ru.md)
 
-Multi-agent Telegram platform powered by Claude Agent SDK. A fleet of AI agents with a shared message bus, background memory processing, cron jobs, and MCP integrations. Runs on a Claude Pro subscription ($20/mo, unlimited), not through the API.
+Multi-agent Telegram platform powered by Claude Agent SDK. A fleet of AI agents with a shared message bus, a 3-level knowledge graph, self-improving advisors, a community skill marketplace, background memory processing, and MCP integrations. Runs on a Claude Pro subscription ($20/mo, unlimited), not through the API.
 
 ## Features
 
-- **Multi-agent fleet** -- multiple agents, each with its own Telegram bot, SOUL, and skills
+- **Four base agents** -- `me` (strategic advisor / master), `coder` (dev workflow), `team` (group hub), `archivist` (domain-agnostic document archive)
+- **Multi-agent fleet** -- add unlimited custom agents, each with its own Telegram bot, SOUL, and skills
+- **Agent delegation** -- master/worker hierarchy, Orchestrator routes messages through the MessageBus
+- **Sandbox** -- filesystem isolation for worker agents, scoped allowed tools per agent
 - **MessageBus** -- async message bus between agents (pub/sub, broadcast, prefix routing)
 - **Streaming responses** -- text appears in Telegram as it's generated, not as a single block
-- **Dream Memory** -- background 2-phase memory processing on a schedule (fact extraction + wiki updates)
-- **Heartbeat** -- proactive agent: checks tasks, executes them, decides whether to notify
+- **Dream Memory** -- background 3+ phase memory processing (fact extraction, wiki updates, pattern analysis)
+- **Knowledge Graph** -- 3-level nightly memory linking pipeline (Obsidian-style `[[links]]`, daily summaries, graph synthesis)
+- **SkillAdvisor / SchemaAdvisor** -- agents analyze usage patterns and proactively propose new skills or schema improvements, never applied automatically
+- **Skill Pool marketplace** -- install community skills from a shared pool (`/poolskills`, `/installskill`), hot-reload without restart
+- **SkillCreator** -- dynamic skill creation via the orchestrator on demand
+- **Smart Heartbeat** -- proactive agent with cron triggers: checks tasks, executes, decides whether to notify
+- **Smart Context Management** -- budget system with semantic wiki search, keeps context tight under 200K
 - **Cron jobs** -- periodic tasks with cron expressions (digests, summaries, monitoring)
 - **MCP servers** -- connect Todoist, GitHub, Google Calendar, and any MCP via config
-- **Wiki memory** (Karpathy model) -- automatically records people, decisions, ideas with git versioning
-- **Skills with dependencies** -- YAML frontmatter: checks commands and env vars before loading
+- **Wiki memory** (Karpathy model) -- automatically records people, decisions, ideas with git versioning and rollback
+- **Skills with frontmatter** -- agentskills.io spec alignment, progressive disclosure, multi-file bundles, dependency checks
+- **Hook system, Command Guard, Consolidator** -- execution pre/post hooks, command allow/deny policies, memory compaction
 - **Voice messages** -- transcription via Deepgram API (Nova-3)
-- **Files** -- receive and analyze documents, photos via Telegram (up to 20MB)
+- **Files** -- receive and analyze documents, photos via Telegram (up to 20MB); file round-trip outbox pattern for sending files back
 - **Group chats** -- dual-mode (DM + groups), silent logging, isolated memory, topic support
-- **Onboarding** -- language selection + profile setup on first launch
+- **Hot agent management** -- `/create_agent`, `/clone_agent`, `/set_access`, `/start_agent`, `/stop_agent` without service restart
+- **Onboarding** -- language selection + profile setup on first launch, `/start` auto-registers first client
 - **i18n** -- English and Russian interface, language auto-saved per user
 
 ## Quick Start
@@ -183,65 +193,83 @@ Supported cron expressions: `*`, `*/N`, `N-M`, `N,M,K`, exact values. Format: `m
 ```
 Telegram User → TelegramBridge → MessageBus → AgentWorker → Agent.call_claude()
                      ↑                                            ↓
-                bus listener ← ── ── ── ── ── ── ← ── ── ── response/streaming
-                     ↓
-              StatusMessage (streaming, tool hints)
+                bus listener ← ── ── ── ── ── ← ── ── ── ── response/streaming
+                     ↓                                            ↓
+              StatusMessage (streaming, tool hints)         Delegation → worker agent
+                                                            (sandboxed)
 
 Background processes:
-  Dream loop (every N hours) → Phase 1 (haiku: fact extraction)
-                              → Phase 2 (sonnet: wiki updates)
-  Heartbeat (every 30 min)   → Check → Execute → Evaluate → Notify?
-  Cron (on schedule)         → Execute prompt → Notify
+  Dream loop (every N hours)  → Phase 1  (haiku: fact extraction)
+                               → Phase 2  (sonnet: wiki updates)
+                               → Phase 3  (SkillAdvisor: pattern analysis → skill suggestions)
+                               → Phase 3b (SchemaAdvisor: vault analysis → schema suggestions, archivist only)
+  Knowledge Graph (nightly)   → Level 1 (link daily notes with [[wiki]] refs)
+                               → Level 2 (daily summaries with cross-references)
+                               → Level 3 (graph synthesis, adaptive schedule)
+  Smart Heartbeat (triggers)  → Check → Execute → Evaluate → Notify?
+  Cron (on schedule)          → Execute prompt → Notify
+  Consolidator                → Memory compaction when context approaches limits
 ```
 
 ## Project Structure
 
 ```
 src/
-  main.py             -- entry point, fleet launcher
-  agent.py            -- Agent: config, system prompt, Claude calls, MCP
-  agent_worker.py     -- AgentWorker: bridges Agent with MessageBus
-  telegram_bridge.py  -- Telegram handlers, message aggregation, streaming
-  bus.py              -- MessageBus: pub/sub bus on asyncio.Queue
-  orchestrator.py     -- message routing between agents
-  dream.py            -- Dream Memory: background memory processing
-  heartbeat.py        -- Heartbeat: proactive tasks
-  cron.py             -- Cron: scheduled periodic tasks
-  memory.py           -- Karpathy Wiki: profile, wiki/, daily notes, git-backed
-  command_router.py   -- 4-level command router
-  agent_manager.py    -- Agent Manager: create/list/validate agents
-  cli.py              -- CLI interface for agent management
-  tool_hints.py       -- tool status messages
-  voice_handler.py    -- voice via Deepgram API
-  file_handler.py     -- file upload/download
+  main.py               -- entry point, fleet launcher
+  agent.py              -- Agent: config, system prompt, Claude calls, MCP
+  agent_worker.py       -- AgentWorker: bridges Agent with MessageBus
+  agent_manager.py      -- Agent Manager: create/list/validate agents
+  telegram_bridge.py    -- Telegram handlers, message aggregation, streaming
+  bus.py                -- MessageBus: pub/sub bus on asyncio.Queue
+  orchestrator.py       -- message routing between agents
+  delegation.py         -- master/worker delegation hierarchy
+  dispatcher.py         -- background message dispatch with explicit chat routing
+  dream.py              -- Dream Memory: 4-phase background processing
+  knowledge_graph.py    -- 3-level nightly memory linking pipeline
+  skill_advisor.py      -- Dream Phase 3: pattern analysis → skill suggestions
+  schema_advisor.py     -- Dream Phase 3b: vault analysis → schema suggestions (archivist)
+  skill_pool.py         -- community skill marketplace (install from shared pool)
+  skill_creator.py      -- dynamic skill creation via orchestrator
+  smart_heartbeat.py    -- proactive agent with cron triggers
+  heartbeat.py          -- legacy heartbeat (simple interval)
+  consolidator.py       -- memory compaction when context approaches limits
+  hooks.py              -- pre/post execution hooks
+  command_guard.py      -- command allow/deny policies
+  sandbox.py            -- filesystem isolation for worker agents
+  cron.py               -- Cron: scheduled periodic tasks
+  memory.py             -- Karpathy Wiki: profile, wiki/, daily notes, git-backed
+  input_sanitizer.py    -- input validation and sanitization
+  ssrf_protection.py    -- SSRF guard for WebFetch/URL handling
+  audit.py              -- audit log for security-relevant operations
+  metrics.py            -- metrics collection
+  checkpoint.py         -- session checkpointing
+  command_router.py     -- 4-level command router
+  cli.py                -- CLI interface for agent management
+  tool_hints.py         -- tool status messages
+  voice_handler.py      -- voice via Deepgram API
+  file_handler.py       -- file upload/download with outbox round-trip
+  i18n.py               -- English/Russian locale system
 
-agents/me/                    -- strategic advisor
-  agent.yaml                  -- config (bot_token, skills, dream, heartbeat, cron, mcp)
-  SOUL.md                     -- agent personality
-  skills/                     -- skills with YAML frontmatter
-  templates/                  -- prompt templates for Dream
-  memory/                     -- storage with git versioning
+agents/me/                    -- strategic advisor (master)
+agents/coder/                 -- technical agent (dev tools: Bash, Edit, Grep)
+agents/team/                  -- team hub (groups, task-tracking, research)
+agents/archivist/             -- document archive, domain-agnostic
+  agent.yaml                  -- config (5 skills, schema_advisor, vault-lint cron)
+  skills/                     -- vault-init, document-ingest, archive-search,
+                                 vault-lint, schema-evolve
+  memory_template/            -- empty public scaffold (CLAUDE.md, .vault-config.json)
+  meta-templates/             -- templates for generating domain-specific templates
+  examples/                   -- reference domains (small-business, ...)
 
-agents/coder/                 -- technical agent
-  agent.yaml                  -- config (Bash, Edit, Grep and other dev-tools)
-  SOUL.md                     -- coder personality
-  skills/                     -- code-review, debugging
-  templates/                  -- prompt templates for Dream
-  memory/                     -- storage with git versioning
-
-agents/team/                  -- team assistant (group chat)
-  agent.yaml                  -- config (group access, research, task-tracking)
-  SOUL.md                     -- Team Hub personality
-  skills/                     -- task-tracking, knowledge-base, research
-  templates/                  -- prompt templates for Dream
-  memory/                     -- storage with git versioning
+Each agent folder contains: agent.yaml, SOUL.md (gitignored, local),
+skills/, templates/, memory/ (gitignored, seeded from memory_template/ on startup).
 ```
 
 ## Bot Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome + onboarding on first launch |
+| `/start` | Welcome + onboarding on first launch, auto-registers first client |
 | `/help` | Command reference |
 | `/newsession` | Reset context (new Claude session) |
 | `/stop` | Stop current request (works even when agent is busy) |
@@ -252,8 +280,12 @@ agents/team/                  -- team assistant (group chat)
 | `/model` | Switch Claude model (Haiku/Sonnet/Opus) |
 | `/agents` | List all agents and their status |
 | `/create_agent` | Create a new agent via interactive wizard |
+| `/clone_agent` | Copy SOUL, skills, and settings from an existing agent |
 | `/start_agent` | Start an agent by name |
 | `/stop_agent` | Stop an agent by name |
+| `/set_access` | Manage agent access on the fly (add/remove allowed users) |
+| `/poolskills` | Browse skills available in the community skill pool |
+| `/installskill` | Install a skill from the pool (hot-reload) |
 | `/restart` | Restart the platform (applies code updates) |
 
 ## Agent Config (agent.yaml)
@@ -359,5 +391,7 @@ Multiple users can run their own bot instances on the same server:
 ## Roadmap
 
 - **Phase 1 (done):** personal assistant, files, voice, memory, onboarding, git-backed wiki
-- **Phase 2 (done):** MessageBus, Orchestrator, Dream Memory, Heartbeat, Skills frontmatter
+- **Phase 2 (done):** MessageBus, Orchestrator, Dream Memory, Heartbeat, Skills frontmatter, Consolidator, Hook system, Command Guard
 - **Phase 3 (done):** multi-agent fleet, group chats, topics, streaming, MCP, cron, i18n
+- **Phase 4 (done):** agent delegation (master/worker), semantic wiki search, Smart Heartbeat with triggers, Smart Context Management, Knowledge Graph (3-level nightly linking), SkillAdvisor (Dream Phase 3), SkillCreator
+- **Phase 5 (done):** security hardening (sandbox, SSRF protection, audit, input sanitization), metrics, streaming polish, checkpoint, CI, `/set_access`, `/clone_agent`, file round-trip outbox, Skill Pool marketplace (install from community pool), Archivist agent (4th base) with SchemaAdvisor (Dream Phase 3b)
