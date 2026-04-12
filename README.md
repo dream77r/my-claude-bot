@@ -2,28 +2,38 @@
 
 [🇷🇺 Русская версия](README.ru.md)
 
-**What it is in 5 sentences.** My Claude Bot turns your Claude Pro ($20/mo) or Claude Max ($100/mo, $200/mo) subscription into a fleet of AI Telegram agents — strategic advisor, coder, team hub, and document archivist out of the box, plus unlimited custom agents, each as a separate Telegram bot with its own personality and memory. Agents share a MessageBus, remember everything in git-versioned wiki memory, and self-improve overnight via Dream cycles that analyse usage and propose new skills or schema changes. Works in personal chats and groups, handles files and voice messages, installs community skills from a shared marketplace, and runs unattended on any cheap VPS. No API bills, no per-call charges — install with one command, update with one command. If you want a persistent personal AI team that lives inside Telegram where you already are and costs a fixed monthly fee with no surprises, this is for you.
+**What it is in 5 sentences.** My Claude Bot turns your Claude Pro ($20/mo) or Claude Max ($100/mo, $200/mo) subscription into a fleet of AI Telegram agents centred on `me` — the master orchestrator and entry point that configures and delegates to sandboxed workers: `coder`, `team` hub, `archivist`, plus unlimited custom agents you can spin up on the fly. Only `me` has unrestricted access; every worker agent is locked inside its own `agents/{name}/` folder with a scoped tool allowlist and cannot read or write anything outside it. Agents share a MessageBus, remember everything in git-versioned wiki memory, and self-improve overnight via Dream cycles that analyse usage and propose new skills or schema changes. Works in personal chats and groups, handles files and voice messages, installs community skills from a shared marketplace, and runs unattended on any cheap VPS. No API bills, no per-call charges — install with one command, update with one command, and pay a fixed monthly fee for everything.
 
 ```
-          Telegram  (DMs + group chats + forum topics)
-       ┌──────┬────────┬───────┬────────────┬──────────┐
-       │      │        │       │            │          │
-       ▼      ▼        ▼       ▼            ▼          ▼
-      me    coder    team   archivist    custom…    custom…
-    (master) (dev)  (group)  (docs)      (your own agents)
-       │      │        │       │            │          │
-       └──────┴────────┴───────┴────────────┴──────────┘
-                             │
-                   MessageBus + Orchestrator
-                     (delegation, routing)
-                             │
-           ┌─────────────────┼──────────────────┐
-           │                 │                  │
-     ┌─────▼──────┐   ┌──────▼──────┐   ┌───────▼───────┐
-     │ Claude Pro │   │ Wiki memory │   │   Skills +    │
-     │   or Max   │   │ per agent,  │   │ community Pool│
-     │ (flat fee) │   │ git-backed  │   │  marketplace  │
-     └────────────┘   └─────────────┘   └───────────────┘
+                     Telegram  (DMs + groups + topics)
+                                  │
+                                  ▼
+                      ┌──────────────────────┐
+                      │          me          │ ◄── master / orchestrator
+                      │   full access, all   │     entry point, configures
+                      │   tools, creates     │     and delegates to workers
+                      │   other agents       │
+                      └──────────┬───────────┘
+                                 │
+                                 ▼ delegates via MessageBus
+            ┌──────────┬─────────┴─────────┬────────────┐
+            │          │                   │            │
+            ▼          ▼                   ▼            ▼
+          coder       team             archivist     custom…
+          (dev)      (group)             (docs)     (your own)
+            │          │                   │            │
+            └──────────┴───────────────────┴────────────┘
+             sandboxed workers: each locked to agents/{name}/
+             with scoped tool allowlist, cannot touch other folders
+
+                                 │
+               ┌─────────────────┼──────────────────┐
+               ▼                 ▼                  ▼
+         ┌──────────┐     ┌────────────┐     ┌────────────┐
+         │Claude Pro│     │Wiki memory │     │  Skills +  │
+         │  or Max  │     │ per agent, │     │ Pool market│
+         │(flat fee)│     │ git-backed │     │            │
+         └──────────┘     └────────────┘     └────────────┘
 
     Background: Dream (4 phases) · Knowledge Graph · Smart Heartbeat · Cron
                 SkillAdvisor / SchemaAdvisor · Consolidator · Sandbox
@@ -31,10 +41,10 @@
 
 ## Features
 
-- **Four base agents** -- `me` (strategic advisor / master), `coder` (dev workflow), `team` (group hub), `archivist` (domain-agnostic document archive)
-- **Multi-agent fleet** -- add unlimited custom agents, each with its own Telegram bot, SOUL, and skills
+- **Master + workers** -- `me` is the master orchestrator and entry point with full access, configures everything and delegates to workers; `coder` (dev workflow), `team` (group hub), and `archivist` (domain-agnostic document archive) ship as ready-to-use sandboxed workers
+- **Multi-agent fleet** -- add unlimited custom agents on top, each with its own Telegram bot, SOUL, and skills; all non-master agents inherit the sandbox
 - **Agent delegation** -- master/worker hierarchy, Orchestrator routes messages through the MessageBus
-- **Sandbox** -- filesystem isolation for worker agents, scoped allowed tools per agent
+- **Sandbox** -- every non-master agent runs inside its own `agents/{name}/` folder with a scoped tool allowlist, cannot read or write outside it; only `me` has unrestricted access
 - **MessageBus** -- async message bus between agents (pub/sub, broadcast, prefix routing)
 - **Streaming responses** -- text appears in Telegram as it's generated, not as a single block
 - **Dream Memory** -- background 3+ phase memory processing (fact extraction, wiki updates, pattern analysis)
@@ -398,6 +408,7 @@ Each agent is a separate Telegram bot with isolated memory. The Orchestrator aut
 - Tokens stored in `.env` (not tracked by git, file permissions 600)
 - Bot access restricted to specified Telegram IDs (`allowed_users`)
 - Claude CLI runs with a limited set of tools (`allowedTools`)
+- **Master/worker isolation:** only `me` (the master orchestrator) has unrestricted access; every other agent runs inside its own `agents/{name}/` folder with a scoped tool allowlist and cannot read or write outside it
 - Each agent's memory is isolated (its own `memory/`)
 - Git-versioned memory with rollback capability (`/restore`)
 - Group chats: owner's personal data never exposed in group system prompts
