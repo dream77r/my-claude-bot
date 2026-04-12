@@ -2213,7 +2213,10 @@ class TelegramBridge:
                 group_chat_id=chat_id if is_group else None,
             )
 
-            memory.log_message(self.agent.agent_dir, "assistant", response)
+            # В группах ответ логируется в groups/{chat_id}/daily/;
+            # в персональный daily пишем только DM-ответы (симметрично ~2142).
+            if not is_group:
+                memory.log_message(self.agent.agent_dir, "assistant", response)
 
             # Проверить outbox файлы
             from .file_handler import scan_outbox
@@ -2734,10 +2737,7 @@ class TelegramBridge:
                 elif event == "response":
                     # Финальный ответ
                     status = self._status_messages.pop(chat_id, None)
-                    memory.log_message(
-                        self.agent.agent_dir, "assistant", msg.content
-                    )
-                    self._log_outbound_to_group(chat_id, msg.content, app)
+                    self._log_assistant_reply(chat_id, msg.content, app)
                     # Попробовать edit на месте (без flash)
                     finalized = False
                     if status and not msg.files:
@@ -2766,7 +2766,7 @@ class TelegramBridge:
                     await self._send_via_bot(
                         app, chat_id, msg.content, thread_id
                     )
-                    self._log_outbound_to_group(chat_id, msg.content, app)
+                    self._log_assistant_reply(chat_id, msg.content, app)
 
                 elif msg.msg_type.value == "outbound" and not event:
                     # Generic outbound (cron/heartbeat/dispatcher notifications).
@@ -2775,7 +2775,7 @@ class TelegramBridge:
                     await self._send_via_bot(
                         app, chat_id, msg.content, thread_id
                     )
-                    self._log_outbound_to_group(chat_id, msg.content, app)
+                    self._log_assistant_reply(chat_id, msg.content, app)
 
             except asyncio.CancelledError:
                 logger.info(f"Bus listener '{queue_name}' остановлен")
@@ -2783,30 +2783,33 @@ class TelegramBridge:
             except Exception as e:
                 logger.error(f"Bus listener error: {e}")
 
-    def _log_outbound_to_group(
+    def _log_assistant_reply(
         self, chat_id: int, text: str, app: Application
     ) -> None:
-        """Дублировать исходящий ответ бота в групповой daily-лог.
+        """Единая точка записи ответа ассистента.
 
-        Для DM (chat_id >= 0) — no-op: там пишет memory.log_message.
+        DM (chat_id >= 0) → memory/daily/ (персональный лог).
+        Группа (chat_id < 0) → memory/groups/{chat_id}/daily/.
+        Один ответ = один лог-файл, без дублей.
         """
-        if chat_id >= 0:
-            return
-        bot_name = (
-            getattr(app.bot, "first_name", None)
-            or getattr(app.bot, "username", None)
-            or self.agent.name
-        )
         try:
-            memory.log_group_message(
-                self.agent.agent_dir,
-                chat_id,
-                bot_name,
-                text,
-                role="assistant",
-            )
+            if chat_id >= 0:
+                memory.log_message(self.agent.agent_dir, "assistant", text)
+            else:
+                bot_name = (
+                    getattr(app.bot, "first_name", None)
+                    or getattr(app.bot, "username", None)
+                    or self.agent.name
+                )
+                memory.log_group_message(
+                    self.agent.agent_dir,
+                    chat_id,
+                    bot_name,
+                    text,
+                    role="assistant",
+                )
         except Exception as e:
-            logger.error(f"log_group_message (outbound) error: {e}")
+            logger.error(f"_log_assistant_reply error: {e}")
 
     async def _send_via_bot(
         self,
