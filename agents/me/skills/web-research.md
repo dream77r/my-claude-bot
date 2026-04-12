@@ -4,6 +4,9 @@ version: 1.0.0
 description: "Поиск и анализ информации в интернете"
 license: MIT
 when_to_use: "When user asks to find info, research a topic, verify a fact, or needs current data"
+triggers:
+  keywords: ["найди", "поищи", "исследу", "гугли", "google", "поиск в интернете", "search", "актуальн", "свежие новости", "проверь факт", "источник", "ссылк"]
+  file_extensions: []
 tags: [research, web, search]
 requires_memory: []
 requirements:

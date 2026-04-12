@@ -4,6 +4,9 @@ version: 1.0.0
 description: "Отладка: поиск и исправление багов"
 license: MIT
 when_to_use: "When user describes a bug, error, or unexpected behavior"
+triggers:
+  keywords: ["баг", "bug", "ошибк", "error", "не работает", "сломал", "падает", "exception", "traceback", "stacktrace", "краш", "crash", "исправ", "дебаг", "debug"]
+  file_extensions: [".log", ".stacktrace"]
 tags: [coding, debugging, troubleshooting]
 requires_memory: []
 requirements:

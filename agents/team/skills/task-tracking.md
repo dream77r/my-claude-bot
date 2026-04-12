@@ -4,6 +4,9 @@ version: 1.0.0
 description: "Трекинг задач команды: создание, обновление, статусы"
 license: MIT
 when_to_use: "When someone creates a task, updates status, asks about task status, or assigns responsibility"
+triggers:
+  keywords: ["задач", "task", "нужно сделать", "сделал", "готов", "блокер", "дедлайн", "deadline", "назнач", "ответственный", "todo", "кто возьм", "статус", "в работе"]
+  file_extensions: []
 tags: [tasks, team, tracking]
 requires_memory: ["wiki/concepts/tasks.md"]
 requirements:

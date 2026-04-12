@@ -4,6 +4,9 @@ version: 1.0.0
 description: "Исследования: поиск информации, анализ, идеи"
 license: MIT
 when_to_use: "When user asks to research a topic, find info, or analyze something"
+triggers:
+  keywords: ["найди", "поищи", "исследу", "research", "поиск информации", "проанализируй тему"]
+  file_extensions: []
 tags: [research, analysis, web]
 requires_memory: []
 requirements:

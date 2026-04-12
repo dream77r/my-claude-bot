@@ -4,6 +4,9 @@ version: 1.0.0
 description: "База знаний команды: хранение и поиск информации"
 license: MIT
 when_to_use: "When someone asks about past decisions, team knowledge, or shares important info to remember"
+triggers:
+  keywords: ["запомни", "помни", "что мы решили", "где у нас", "кто отвечает", "наше решение", "wiki", "запиши", "сохрани в базу", "база знаний", "мы договорились"]
+  file_extensions: []
 tags: [knowledge, team, memory, wiki]
 requires_memory: []
 requirements:

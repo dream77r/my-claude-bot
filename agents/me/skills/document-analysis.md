@@ -4,6 +4,9 @@ version: 1.0.0
 description: "Анализ документов: PDF, DOCX, TXT, изображения"
 license: MIT
 when_to_use: "When user sends a file (PDF, DOCX, TXT, image) or asks to analyze a document"
+triggers:
+  keywords: ["документ", "договор", "контракт", "письм", "презентац", "проанализируй", "разбери документ", "что в файле"]
+  file_extensions: [".pdf", ".docx", ".doc", ".txt", ".rtf", ".pptx"]
 tags: [documents, analysis, pdf, ocr]
 requires_memory: []
 requirements:

@@ -211,10 +211,10 @@ class Agent:
     @staticmethod
     def check_skill_requirements(meta: dict) -> tuple[bool, list[str]]:
         """
-        Проверить зависимости скилла.
+        Проверить жёсткие зависимости скилла (команды, env-переменные).
 
         Returns:
-            (ok, список ошибок)
+            (ok, список ошибок) — если ok=False, скилл должен быть отключён
         """
         errors = []
         reqs = meta.get("requirements", {})
@@ -226,25 +226,94 @@ class Agent:
                 errors.append(f"переменная '{env_var}' не задана")
         return len(errors) == 0, errors
 
-    def _load_skills(self) -> str:
+    @staticmethod
+    def match_skill_triggers(user_message: str, meta: dict) -> bool:
+        """
+        Проверить совпадает ли сообщение пользователя с триггерами скилла.
+
+        Поддерживаемые поля в meta["triggers"]:
+            keywords: список подстрок (case-insensitive, substring-match)
+            file_extensions: список расширений (напр. ".pdf")
+
+        Args:
+            user_message: текст сообщения пользователя
+            meta: распарсенный frontmatter скилла
+
+        Returns:
+            True если хотя бы один триггер совпал
+        """
+        triggers = meta.get("triggers") or {}
+        if not triggers:
+            return False
+        msg_lower = user_message.lower()
+        for keyword in triggers.get("keywords") or []:
+            if str(keyword).lower() in msg_lower:
+                return True
+        for ext in triggers.get("file_extensions") or []:
+            if str(ext).lower() in msg_lower:
+                return True
+        return False
+
+    @staticmethod
+    def check_skill_memory_requirements(meta: dict, memory_path: str) -> list[str]:
+        """
+        Проверить декларированные файлы памяти (requires_memory).
+
+        В отличие от check_skill_requirements это мягкая проверка: отсутствие
+        файла памяти НЕ отключает скилл. Возвращается список отсутствующих
+        файлов, чтобы вызывающий код мог показать подсказку пользователю или
+        залогировать warning.
+
+        Args:
+            meta: распарсенный frontmatter скилла
+            memory_path: путь к папке памяти агента
+
+        Returns:
+            Список относительных путей к отсутствующим файлам (пустой — всё ок)
+        """
+        required = meta.get("requires_memory") or []
+        if not required:
+            return []
+        missing = []
+        base = Path(memory_path)
+        for rel in required:
+            if not (base / rel).exists():
+                missing.append(rel)
+        return missing
+
+    def _load_skills(self, user_message: str | None = None) -> str:
         """
         Загрузить скиллы из agents/{name}/skills/*.md.
 
-        Поддерживает YAML frontmatter:
-        - description: описание скилла
-        - requirements.commands: проверка через shutil.which()
-        - requirements.env: проверка через os.environ
-        - always: true = всегда в system prompt (иначе по имени из agent.yaml)
+        Поддерживает YAML frontmatter (agentskills.io-совместимый):
+        - name, version, description, license, when_to_use, tags
+        - triggers: {keywords, file_extensions} — для progressive disclosure
+        - requires_memory: список файлов памяти (мягкая проверка)
+        - requirements.commands/env: жёсткие проверки
+        - always: true = всегда полное тело в system prompt
+
+        Режимы работы:
+        - user_message=None (legacy): полное тело каждого активного скилла
+          попадает в system prompt. Поведение совместимо со старым кодом.
+        - user_message=str (progressive): в system prompt попадают только
+          метаданные (каталог). Полное тело подгружается только для:
+            a) скиллов с always=true
+            b) скиллов, чьи триггеры совпали с сообщением пользователя
+          Активация живёт только внутри одного вызова — при следующем
+          сообщении pattern-match запускается заново.
+
+        Returns:
+            Строка для включения в system prompt (может быть пустой)
         """
         skills_dir = Path(self.agent_dir) / "skills"
         if not skills_dir.exists():
             return ""
 
-        parts = []
+        eligible: list[tuple[str, dict | None, str]] = []  # (name, meta, body)
+
         for skill_file in sorted(skills_dir.glob("*.md")):
             raw = skill_file.read_text(encoding="utf-8")
             meta, body = self.parse_skill_frontmatter(raw)
-
             skill_name = skill_file.stem
 
             # Фильтрация: если не always и не в списке skills из yaml — пропустить
@@ -252,7 +321,7 @@ class Agent:
                 if self.skill_names and skill_name not in self.skill_names:
                     continue
 
-            # Проверка зависимостей
+            # Проверка жёстких зависимостей (команды, env)
             if meta:
                 ok, errors = self.check_skill_requirements(meta)
                 if not ok:
@@ -261,11 +330,73 @@ class Agent:
                     )
                     continue
 
-            parts.append(body.strip() if meta else raw.strip())
+                # Мягкая проверка файлов памяти (requires_memory)
+                missing_memory = self.check_skill_memory_requirements(
+                    meta, self.memory_path
+                )
+                if missing_memory:
+                    logger.warning(
+                        f"Скилл '{skill_name}' активен, но ждёт файлы памяти: "
+                        f"{', '.join(missing_memory)}"
+                    )
 
-        if parts:
-            return "\n\n---\n\n".join(parts)
-        return ""
+            eligible.append((skill_name, meta, body if meta else raw))
+
+        if not eligible:
+            return ""
+
+        # Legacy-режим: полное тело всех подходящих скиллов
+        if user_message is None:
+            return "\n\n---\n\n".join(
+                (body if body else "").strip() for _, _, body in eligible
+            )
+
+        # Progressive-режим: метаданные всех + полные тела только активированных
+        catalog_lines: list[str] = []
+        full_bodies: list[str] = []
+        activated: list[str] = []
+
+        for skill_name, meta, body in eligible:
+            if meta is None:
+                # Legacy-скилл без frontmatter — грузим как есть (нет метаданных)
+                full_bodies.append(body.strip())
+                continue
+
+            always = bool(meta.get("always", False))
+            triggered = self.match_skill_triggers(user_message, meta)
+
+            if always or triggered:
+                full_bodies.append(body.strip())
+                if triggered and not always:
+                    activated.append(skill_name)
+            else:
+                # Только метаданные в каталог
+                desc = meta.get("description", "").strip() or meta.get("when_to_use", "")
+                when = meta.get("when_to_use", "")
+                line = f"- **{skill_name}** — {desc}"
+                if when and when != desc:
+                    line += f" _(активируется когда: {when})_"
+                catalog_lines.append(line)
+
+        if activated:
+            logger.info(
+                f"[{self.name}] Progressive disclosure: активированы скиллы "
+                f"{', '.join(activated)} для сообщения длиной {len(user_message)} симв."
+            )
+
+        sections: list[str] = []
+        if catalog_lines:
+            sections.append(
+                "### Каталог доступных скиллов (метаданные)\n\n"
+                + "\n".join(catalog_lines)
+                + "\n\n"
+                + "_Если задача требует одного из этих скиллов, а его полная "
+                "инструкция не видна, попроси пользователя явно назвать скилл._"
+            )
+        if full_bodies:
+            sections.append("\n\n---\n\n".join(full_bodies))
+
+        return "\n\n---\n\n".join(sections)
 
     def _load_soul(self) -> str:
         """Загрузить SOUL.md из директории агента."""
@@ -429,8 +560,8 @@ class Agent:
         if self.system_prompt_template:
             parts.append(self.system_prompt_template)
 
-        # 3. Скиллы
-        skills = self._load_skills()
+        # 3. Скиллы (progressive disclosure если есть запрос пользователя)
+        skills = self._load_skills(user_message=user_query or None)
         if skills:
             parts.append("## Скиллы\n\n" + skills)
 

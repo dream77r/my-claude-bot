@@ -4,6 +4,9 @@ version: 1.0.0
 description: "Code review: анализ кода на баги, безопасность, качество"
 license: MIT
 when_to_use: "When user asks to review code, a file, or a diff"
+triggers:
+  keywords: ["ревью", "review", "проверь код", "проверь файл", "посмотри код", "diff", "качество кода", "pull request", " pr "]
+  file_extensions: []
 tags: [coding, review, quality]
 requires_memory: []
 requirements:

@@ -173,13 +173,241 @@ class TestLoadSkills:
         assert "Legacy" in prompt
 
 
+class TestMatchSkillTriggers:
+    """Unit-тесты для match_skill_triggers (локальный pattern-match)."""
+
+    def test_no_triggers_returns_false(self):
+        assert Agent.match_skill_triggers("любое сообщение", {}) is False
+        assert Agent.match_skill_triggers("любое", {"triggers": None}) is False
+        assert Agent.match_skill_triggers("любое", {"triggers": {}}) is False
+
+    def test_keyword_exact_match(self):
+        meta = {"triggers": {"keywords": ["баг"]}}
+        assert Agent.match_skill_triggers("у меня баг в коде", meta) is True
+
+    def test_keyword_case_insensitive(self):
+        meta = {"triggers": {"keywords": ["Error"]}}
+        assert Agent.match_skill_triggers("получил ERROR в логах", meta) is True
+
+    def test_keyword_substring_match(self):
+        # "баг" должен найтись в "багов"
+        meta = {"triggers": {"keywords": ["баг"]}}
+        assert Agent.match_skill_triggers("исправил кучу багов", meta) is True
+
+    def test_no_match(self):
+        meta = {"triggers": {"keywords": ["баг", "ошибка"]}}
+        assert Agent.match_skill_triggers("посмотри документ", meta) is False
+
+    def test_file_extension_match(self):
+        meta = {"triggers": {"file_extensions": [".pdf", ".docx"]}}
+        assert Agent.match_skill_triggers("вот файл contract.pdf", meta) is True
+        assert Agent.match_skill_triggers("вот файл report.docx", meta) is True
+
+    def test_file_extension_no_match(self):
+        meta = {"triggers": {"file_extensions": [".pdf"]}}
+        assert Agent.match_skill_triggers("вот файл report.txt", meta) is False
+
+    def test_multiple_keywords_any_match(self):
+        meta = {"triggers": {"keywords": ["a", "b", "c"]}}
+        assert Agent.match_skill_triggers("text with b inside", meta) is True
+
+    def test_empty_keywords_list(self):
+        meta = {"triggers": {"keywords": []}}
+        assert Agent.match_skill_triggers("anything", meta) is False
+
+
+class TestProgressiveDisclosure:
+    """Интеграционные тесты progressive-режима _load_skills."""
+
+    @pytest.fixture
+    def progressive_agent(self, tmp_path):
+        agent_dir = tmp_path / "agents" / "test"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "memory").mkdir()
+
+        config = {
+            "name": "test",
+            "bot_token": "123:ABC",
+            "skills": ["debugging", "document-analysis", "always-skill"],
+            "memory_path": str(agent_dir / "memory"),
+        }
+        yaml_path = agent_dir / "agent.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(config, f)
+
+        skills_dir = agent_dir / "skills"
+        skills_dir.mkdir()
+
+        # Скилл с триггером на "баг"
+        (skills_dir / "debugging.md").write_text(
+            "---\n"
+            "name: debugging\n"
+            'description: "Debug skill"\n'
+            "triggers:\n"
+            "  keywords: ['баг', 'error']\n"
+            "always: false\n"
+            "---\n"
+            "# Debug Body\nПолная инструкция дебага.\n"
+        )
+
+        # Скилл с триггером на расширение
+        (skills_dir / "document-analysis.md").write_text(
+            "---\n"
+            "name: document-analysis\n"
+            'description: "Analyze documents"\n'
+            "triggers:\n"
+            "  file_extensions: ['.pdf']\n"
+            "always: false\n"
+            "---\n"
+            "# Doc Body\nПолная инструкция анализа.\n"
+        )
+
+        # Always-on скилл — всегда полное тело
+        (skills_dir / "always-skill.md").write_text(
+            "---\n"
+            "name: always-skill\n"
+            'description: "Always loaded"\n'
+            "always: true\n"
+            "---\n"
+            "# Always Body\nВсегда активен.\n"
+        )
+
+        return Agent(str(yaml_path))
+
+    def test_legacy_mode_loads_all_bodies(self, progressive_agent):
+        # Без user_message — полное тело всех скиллов
+        prompt = progressive_agent._load_skills()
+        assert "Debug Body" in prompt
+        assert "Doc Body" in prompt
+        assert "Always Body" in prompt
+
+    def test_progressive_mode_metadata_only_when_no_match(self, progressive_agent):
+        # Сообщение не совпадает ни с одним триггером
+        prompt = progressive_agent._load_skills(user_message="привет, как дела")
+        # Always-скилл всегда в полном виде
+        assert "Always Body" in prompt
+        # Остальные — только в каталоге, без полного тела
+        assert "Debug Body" not in prompt
+        assert "Doc Body" not in prompt
+        # Каталог должен содержать описания
+        assert "Каталог" in prompt
+        assert "debugging" in prompt
+        assert "document-analysis" in prompt
+
+    def test_progressive_mode_activates_by_keyword(self, progressive_agent):
+        prompt = progressive_agent._load_skills(user_message="у меня баг в коде")
+        # debugging активирован
+        assert "Debug Body" in prompt
+        # document-analysis не активирован
+        assert "Doc Body" not in prompt
+        assert "Always Body" in prompt
+
+    def test_progressive_mode_activates_by_file_extension(self, progressive_agent):
+        prompt = progressive_agent._load_skills(
+            user_message="посмотри contract.pdf"
+        )
+        assert "Doc Body" in prompt
+        assert "Debug Body" not in prompt
+        assert "Always Body" in prompt
+
+    def test_progressive_mode_multiple_activations(self, progressive_agent):
+        prompt = progressive_agent._load_skills(
+            user_message="в этом файле report.pdf какой-то баг"
+        )
+        # Оба активированы
+        assert "Debug Body" in prompt
+        assert "Doc Body" in prompt
+        assert "Always Body" in prompt
+
+    def test_progressive_mode_activation_is_session_scoped(self, progressive_agent):
+        # Первый вызов с активацией
+        progressive_agent._load_skills(user_message="у меня баг")
+        # Второй вызов БЕЗ триггера — прошлая активация не должна сохраниться
+        prompt = progressive_agent._load_skills(user_message="привет")
+        assert "Debug Body" not in prompt
+
+
+class TestCheckMemoryRequirements:
+    """Unit-тесты для check_skill_memory_requirements (мягкая проверка)."""
+
+    def test_no_requirements(self, tmp_path):
+        missing = Agent.check_skill_memory_requirements({}, str(tmp_path))
+        assert missing == []
+
+    def test_empty_list(self, tmp_path):
+        missing = Agent.check_skill_memory_requirements(
+            {"requires_memory": []}, str(tmp_path)
+        )
+        assert missing == []
+
+    def test_none_value(self, tmp_path):
+        missing = Agent.check_skill_memory_requirements(
+            {"requires_memory": None}, str(tmp_path)
+        )
+        assert missing == []
+
+    def test_all_files_present(self, tmp_path):
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "wiki" / "profile.md").write_text("test")
+        missing = Agent.check_skill_memory_requirements(
+            {"requires_memory": ["wiki/profile.md"]}, str(tmp_path)
+        )
+        assert missing == []
+
+    def test_missing_file_reported(self, tmp_path):
+        missing = Agent.check_skill_memory_requirements(
+            {"requires_memory": ["wiki/concepts/tasks.md"]}, str(tmp_path)
+        )
+        assert missing == ["wiki/concepts/tasks.md"]
+
+    def test_partial_missing(self, tmp_path):
+        (tmp_path / "a.md").write_text("here")
+        missing = Agent.check_skill_memory_requirements(
+            {"requires_memory": ["a.md", "b.md", "c.md"]}, str(tmp_path)
+        )
+        assert missing == ["b.md", "c.md"]
+
+    def test_soft_check_does_not_block_load(self, tmp_path):
+        """Скилл с отсутствующим файлом памяти должен всё равно загружаться."""
+        agent_dir = tmp_path / "agents" / "test"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "memory").mkdir()  # пустая папка, файла нет
+
+        config = {
+            "name": "test",
+            "bot_token": "123:ABC",
+            "skills": ["needs-memory"],
+            "memory_path": str(agent_dir / "memory"),
+        }
+        yaml_path = agent_dir / "agent.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(config, f)
+
+        skills_dir = agent_dir / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "needs-memory.md").write_text(
+            "---\n"
+            'description: "Needs memory"\n'
+            'requires_memory: ["wiki/profile.md"]\n'
+            "always: false\n"
+            "---\n"
+            "# Needs Memory\nТело скилла.\n"
+        )
+
+        agent = Agent(str(yaml_path))
+        prompt = agent._load_skills()
+        # Скилл должен быть в system prompt несмотря на отсутствующий файл
+        assert "Needs Memory" in prompt
+        assert "Тело скилла" in prompt
+
+
 class TestAgentSkillsIoFormat:
     """
     Контракт-тесты для agentskills.io-совместимого frontmatter.
     Проверяем что все реальные скиллы в agents/*/skills/ соответствуют формату.
     """
 
-    REQUIRED_FIELDS = ["name", "version", "description", "license", "when_to_use", "tags", "requires_memory"]
+    REQUIRED_FIELDS = ["name", "version", "description", "license", "when_to_use", "tags", "requires_memory", "triggers"]
 
     @pytest.fixture
     def all_skill_files(self):
@@ -242,4 +470,20 @@ class TestAgentSkillsIoFormat:
             )
             assert len(meta["when_to_use"]) > 10, (
                 f"{skill_file.name}: when_to_use слишком короткий"
+            )
+
+    def test_triggers_has_keywords_or_extensions(self, all_skill_files):
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            triggers = meta["triggers"]
+            assert isinstance(triggers, dict), (
+                f"{skill_file.name}: triggers не dict"
+            )
+            keywords = triggers.get("keywords") or []
+            extensions = triggers.get("file_extensions") or []
+            assert len(keywords) + len(extensions) > 0, (
+                f"{skill_file.name}: triggers пустые (нет ни keywords ни "
+                f"file_extensions) — progressive disclosure не сможет "
+                f"активировать скилл"
             )
