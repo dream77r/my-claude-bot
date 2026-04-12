@@ -22,6 +22,7 @@ from .agent_worker import AgentWorker
 from .bus import FleetBus
 from .cron import cron_loop
 from .delegation import DelegationManager
+from .dispatcher import dispatcher_loop
 from .dream import dream_loop
 from .knowledge_graph import nightly_graph_loop
 from .heartbeat import heartbeat_loop
@@ -254,6 +255,14 @@ class FleetRuntime:
                 )
             )
             agent_tasks.append(cron_task)
+
+        # Dispatcher: поллит memory/dispatch/ и публикует в bus.
+        # Нужен для cron/heartbeat/self-triggered сообщений, которые
+        # агент адресует в конкретный chat_id+thread_id.
+        dispatch_task = asyncio.create_task(
+            dispatcher_loop(agent.agent_dir, agent.name, bus=self.bus)
+        )
+        agent_tasks.append(dispatch_task)
 
         # Knowledge Graph (ночной пайплайн связей)
         kg_config = agent.config.get("knowledge_graph", {})
@@ -592,6 +601,19 @@ async def async_main() -> None:
             tasks.append(cron_task)
             cron_names = [j["name"] for j in agent.config["cron"]]
             logger.info(f"Cron запущен для '{agent.name}': {', '.join(cron_names)}")
+
+    # ── Dispatcher ──
+    # Поллит memory/dispatch/ у каждого агента и публикует готовые
+    # сообщения в bus с явным chat_id+thread_id. Запускается для всех
+    # агентов: оверхед от glob пустой папки раз в 5 секунд незаметен.
+    for agent in agents:
+        dispatch_task = asyncio.create_task(
+            dispatcher_loop(agent.agent_dir, agent.name, bus=bus)
+        )
+        if agent.name in runtime.tasks:
+            runtime.tasks[agent.name].append(dispatch_task)
+        tasks.append(dispatch_task)
+        logger.info(f"Dispatcher запущен для '{agent.name}'")
 
     # ── Knowledge Graph (ночной пайплайн связей) ──
     for agent in agents:
