@@ -491,21 +491,40 @@ class SkillPool:
         return False
 
 
+# Официальный публичный пул скиллов my-claude-bot.
+# Используется если SKILL_POOL_URL не задан в .env — это дефолт "из коробки".
+# HTTPS (не SSH) чтобы работало без настроенного SSH-ключа у GitHub.
+DEFAULT_SKILL_POOL_URL = "https://github.com/dream77r/my-claude-bot-skills.git"
+
+
 def make_pool_from_env(project_root: Path) -> SkillPool | None:
     """
-    Создать SkillPool из переменных окружения или .env.
+    Создать SkillPool из переменных окружения или дефолта.
 
     Читает:
-        SKILL_POOL_URL (обязательный)
+        SKILL_POOL_URL (опционально, fallback — DEFAULT_SKILL_POOL_URL)
         SKILL_POOL_BRANCH (default main)
         SKILL_POOL_CACHE (default {project_root}/.cache/skill-pool)
 
+    Специальное значение SKILL_POOL_URL=disabled — полностью отключает пул
+    (возвращается None, команды выдают "пул не настроен").
+
     Returns:
-        SkillPool или None если SKILL_POOL_URL не задан
+        SkillPool или None если пул явно отключён через SKILL_POOL_URL=disabled
     """
     url = os.environ.get("SKILL_POOL_URL", "").strip()
-    if not url:
+
+    # Явное отключение
+    if url.lower() in ("disabled", "off", "none"):
         return None
+
+    # Fallback на дефолтный публичный пул
+    if not url:
+        url = DEFAULT_SKILL_POOL_URL
+        logger.info(
+            f"SKILL_POOL_URL не задан, использую дефолтный пул: {url}"
+        )
+
     branch = os.environ.get("SKILL_POOL_BRANCH", "main").strip() or "main"
     cache = os.environ.get("SKILL_POOL_CACHE", "").strip()
     cache_dir = Path(cache) if cache else project_root / ".cache" / "skill-pool"

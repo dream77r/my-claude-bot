@@ -443,12 +443,35 @@ class TestUninstallSkill:
 
 
 class TestMakePoolFromEnv:
-    def test_returns_none_when_no_url(self, tmp_path):
+    def test_empty_url_falls_back_to_default(self, tmp_path):
+        """Пустой SKILL_POOL_URL → дефолтный публичный пул."""
+        from src.skill_pool import DEFAULT_SKILL_POOL_URL
         with patch.dict(os.environ, {"SKILL_POOL_URL": ""}, clear=False):
+            pool = make_pool_from_env(tmp_path)
+        assert pool is not None
+        assert pool.pool_url == DEFAULT_SKILL_POOL_URL
+
+    def test_missing_url_falls_back_to_default(self, tmp_path):
+        """Если переменной нет вообще → дефолтный публичный пул."""
+        from src.skill_pool import DEFAULT_SKILL_POOL_URL
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SKILL_POOL_URL", None)
+            pool = make_pool_from_env(tmp_path)
+        assert pool is not None
+        assert pool.pool_url == DEFAULT_SKILL_POOL_URL
+
+    def test_disabled_returns_none(self, tmp_path):
+        """Явное отключение через SKILL_POOL_URL=disabled."""
+        with patch.dict(os.environ, {"SKILL_POOL_URL": "disabled"}, clear=False):
             pool = make_pool_from_env(tmp_path)
         assert pool is None
 
-    def test_creates_pool_with_defaults(self, tmp_path):
+    def test_off_returns_none(self, tmp_path):
+        with patch.dict(os.environ, {"SKILL_POOL_URL": "off"}, clear=False):
+            pool = make_pool_from_env(tmp_path)
+        assert pool is None
+
+    def test_explicit_url_overrides_default(self, tmp_path):
         env = {
             "SKILL_POOL_URL": "https://github.com/user/skills.git",
         }
