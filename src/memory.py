@@ -30,7 +30,7 @@ def get_memory_path(agent_dir: str) -> Path:
 
 
 def ensure_dirs(agent_dir: str) -> None:
-    """Создать все необходимые директории памяти."""
+    """Создать все необходимые директории памяти и посеять шаблоны."""
     memory = get_memory_path(agent_dir)
     for subdir in [
         "daily",
@@ -45,6 +45,39 @@ def ensure_dirs(agent_dir: str) -> None:
         "dispatch",
     ]:
         (memory / subdir).mkdir(parents=True, exist_ok=True)
+
+    # Посеять содержимое из memory_template/ если он есть рядом с агентом.
+    # Шаблон — часть публичного репо, реальная память — нет (см. .gitignore).
+    # Никогда не перезаписываем существующие файлы, чтобы не затереть
+    # живые данные команды при обновлении проекта.
+    template = Path(agent_dir) / "memory_template"
+    if template.is_dir():
+        _seed_from_template(template, memory)
+
+
+def _seed_from_template(template: Path, memory: Path) -> None:
+    """
+    Скопировать скелет из memory_template/ в memory/, не перезаписывая
+    существующие файлы. Вызывается на каждом старте агента, поэтому
+    безопасно идемпотентна.
+    """
+    for src in template.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(template)
+        # .gitkeep — маркер пустой директории в git, в живой памяти не нужен
+        if src.name == ".gitkeep":
+            (memory / rel.parent).mkdir(parents=True, exist_ok=True)
+            continue
+        dst = memory / rel
+        if dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+            logger.info(f"Seeded template: {rel}")
+        except OSError as e:
+            logger.warning(f"Не удалось посеять {rel}: {e}")
 
 
 def ensure_daily_note(agent_dir: str, date: datetime | None = None) -> Path:
