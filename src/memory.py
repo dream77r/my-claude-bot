@@ -723,12 +723,15 @@ def log_group_message(
     sender_name: str,
     content: str,
     date: datetime | None = None,
+    role: str = "user",
 ) -> None:
     """
     Записать сообщение группы в groups/{chat_id}/daily/YYYY-MM-DD.md.
 
-    Формат: **HH:MM** 👤 Алексей: текст сообщения
+    Формат: **HH:MM** 👤 Алексей: текст сообщения (для role="user")
+            **HH:MM** 🤖 BotName: текст ответа    (для role="assistant")
     Записывается КАЖДОЕ сообщение, даже без mention.
+    Для role="assistant" sender_name — это имя/юзернейм бота.
     """
     if date is None:
         date = datetime.now()
@@ -745,7 +748,8 @@ def log_group_message(
         path.write_text(header, encoding="utf-8")
 
     timestamp = date.strftime("%H:%M")
-    entry = f"**{timestamp}** 👤 {sender_name}: {content[:500]}\n"
+    prefix = "👤" if role == "user" else "🤖"
+    entry = f"**{timestamp}** {prefix} {sender_name}: {content[:500]}\n"
 
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(entry)

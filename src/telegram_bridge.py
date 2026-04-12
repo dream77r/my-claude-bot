@@ -2737,6 +2737,7 @@ class TelegramBridge:
                     memory.log_message(
                         self.agent.agent_dir, "assistant", msg.content
                     )
+                    self._log_outbound_to_group(chat_id, msg.content, app)
                     # Попробовать edit на месте (без flash)
                     finalized = False
                     if status and not msg.files:
@@ -2765,6 +2766,7 @@ class TelegramBridge:
                     await self._send_via_bot(
                         app, chat_id, msg.content, thread_id
                     )
+                    self._log_outbound_to_group(chat_id, msg.content, app)
 
                 elif msg.msg_type.value == "outbound" and not event:
                     # Generic outbound (cron/heartbeat/dispatcher notifications).
@@ -2773,12 +2775,38 @@ class TelegramBridge:
                     await self._send_via_bot(
                         app, chat_id, msg.content, thread_id
                     )
+                    self._log_outbound_to_group(chat_id, msg.content, app)
 
             except asyncio.CancelledError:
                 logger.info(f"Bus listener '{queue_name}' остановлен")
                 break
             except Exception as e:
                 logger.error(f"Bus listener error: {e}")
+
+    def _log_outbound_to_group(
+        self, chat_id: int, text: str, app: Application
+    ) -> None:
+        """Дублировать исходящий ответ бота в групповой daily-лог.
+
+        Для DM (chat_id >= 0) — no-op: там пишет memory.log_message.
+        """
+        if chat_id >= 0:
+            return
+        bot_name = (
+            getattr(app.bot, "first_name", None)
+            or getattr(app.bot, "username", None)
+            or self.agent.name
+        )
+        try:
+            memory.log_group_message(
+                self.agent.agent_dir,
+                chat_id,
+                bot_name,
+                text,
+                role="assistant",
+            )
+        except Exception as e:
+            logger.error(f"log_group_message (outbound) error: {e}")
 
     async def _send_via_bot(
         self,
