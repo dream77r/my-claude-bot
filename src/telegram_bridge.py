@@ -78,6 +78,9 @@ BOT_COMMANDS = [
     BotCommand("skills", "Список скиллов агента"),
     BotCommand("newskill", "Создать новый скилл"),
     BotCommand("removeskill", "Удалить скилл"),
+    BotCommand("poolskills", "Каталог скиллов из пула"),
+    BotCommand("installskill", "Установить скилл из пула"),
+    BotCommand("refreshpool", "Обновить кэш пула скиллов"),
     BotCommand("restart", "Перезапустить платформу"),
 ]
 
@@ -469,8 +472,26 @@ class TelegramBridge:
         # Состояние визарда создания агента: chat_id → {step, data}
         self._wizard_state: dict[int, dict] = {}
 
+        # Skill Pool — ленивая инициализация (создаётся при первом обращении)
+        self._skill_pool_cached = False
+        self._skill_pool = None
+
         # Command router
         self.router = self._build_router()
+
+    def _get_skill_pool(self):
+        """
+        Получить SkillPool из .env (ленивая инициализация).
+
+        Returns:
+            SkillPool или None если SKILL_POOL_URL не задан
+        """
+        if not self._skill_pool_cached:
+            from .skill_pool import make_pool_from_env
+            project_root = Path(self.agent.agent_dir).parent.parent
+            self._skill_pool = make_pool_from_env(project_root)
+            self._skill_pool_cached = True
+        return self._skill_pool
 
     def _get_master_agent_dir(self) -> str | None:
         """Получить agent_dir master-агента (для каскадных настроек)."""
@@ -512,6 +533,11 @@ class TelegramBridge:
         router.exact("/skills", self._cmd_skills)
         router.exact("/newskill", self._cmd_newskill)
         router.exact("/removeskill", self._cmd_removeskill)
+
+        # Skill Pool commands (маркетплейс скиллов)
+        router.exact("/poolskills", self._cmd_poolskills)
+        router.exact("/installskill", self._cmd_installskill)
+        router.exact("/refreshpool", self._cmd_refreshpool)
 
         return router
 
@@ -1872,6 +1898,193 @@ class TelegramBridge:
                 update, context,
                 f"Скилл '{skill_name}' не найден у агента '{target_name}'.\n"
                 f"Список: /skills {target_name}"
+            )
+
+    # ── Skill Pool commands (маркетплейс) ──
+
+    async def _cmd_poolskills(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Показать каталог скиллов из пула: /poolskills"""
+        pool = self._get_skill_pool()
+        if pool is None:
+            await self._reply(
+                update, context,
+                "Пул скиллов не настроен.\n"
+                "Задай SKILL_POOL_URL в .env (см .env.example) "
+                "и перезапусти бота."
+            )
+            return
+
+        # Автоматически обновляем пул если его ещё нет на диске
+        if not pool.is_available():
+            try:
+                pool.refresh()
+            except Exception as e:
+                await self._reply(
+                    update, context,
+                    f"Ошибка при клонировании пула: {e}\n"
+                    f"Проверь SKILL_POOL_URL и доступность репо."
+                )
+                return
+
+        try:
+            skills = pool.list_skills()
+        except Exception as e:
+            await self._reply(
+                update, context,
+                f"Ошибка чтения manifest.json: {e}"
+            )
+            return
+
+        if not skills:
+            await self._reply(
+                update, context,
+                "В пуле пока нет опубликованных скиллов."
+            )
+            return
+
+        lines = ["Каталог скиллов из пула:\n"]
+        for s in skills:
+            tags = " ".join(f"#{t}" for t in s.tags) if s.tags else ""
+            mem_note = ""
+            if s.requires_memory:
+                mem_note = (
+                    f"\n    требует память: {', '.join(s.requires_memory)}"
+                )
+            lines.append(
+                f"• *{s.name}* v{s.version} — {s.description}{mem_note}"
+            )
+            if tags:
+                lines.append(f"    {tags}")
+        lines.append(
+            f"\nВсего: {len(skills)}\n"
+            f"Установить: /installskill <имя> [@agent]"
+        )
+        await self._reply(update, context, "\n".join(lines))
+
+    async def _cmd_installskill(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Установить скилл из пула: /installskill <имя> [@agent]"""
+        # Только master может устанавливать скиллы
+        if not self.agent.is_master:
+            await self._reply(
+                update, context,
+                "Установка скиллов доступна только master-агенту."
+            )
+            return
+
+        parts = args.strip().split()
+        if not parts:
+            await self._reply(
+                update, context,
+                "Укажи имя скилла: /installskill <имя> [@agent]\n"
+                "Каталог: /poolskills"
+            )
+            return
+
+        skill_name = parts[0]
+
+        # Определить целевого агента
+        target_name = self.agent.name
+        target_dir = Path(self.agent.agent_dir)
+        if len(parts) > 1 and parts[1].startswith("@"):
+            candidate = parts[1][1:]
+            if self.fleet_runtime and candidate in self.fleet_runtime.agents:
+                target_name = candidate
+                target_dir = Path(
+                    self.fleet_runtime.agents[candidate].agent_dir
+                )
+            else:
+                await self._reply(
+                    update, context,
+                    f"Агент '{candidate}' не найден."
+                )
+                return
+
+        pool = self._get_skill_pool()
+        if pool is None:
+            await self._reply(
+                update, context,
+                "Пул скиллов не настроен (SKILL_POOL_URL не задан)."
+            )
+            return
+
+        if not pool.is_available():
+            try:
+                pool.refresh()
+            except Exception as e:
+                await self._reply(
+                    update, context,
+                    f"Ошибка при обновлении пула: {e}"
+                )
+                return
+
+        result = pool.install_skill(skill_name, target_dir)
+
+        if not result.ok:
+            await self._reply(
+                update, context,
+                f"Не удалось установить '{skill_name}': {result.error}"
+            )
+            return
+
+        msg_lines = [
+            f"Скилл '{skill_name}' установлен агенту '{target_name}'.",
+            f"Файл: {result.installed_to}",
+        ]
+        if result.missing_memory:
+            msg_lines.append(
+                f"\nВнимание: скилл декларирует файлы памяти, "
+                f"которых пока нет у агента:\n"
+                + "\n".join(f"  - {m}" for m in result.missing_memory)
+                + "\n\nСкилл будет работать, но пока не сможет читать из них. "
+                  "Создай эти файлы через обычный диалог с агентом — "
+                  "он сам их заполнит когда ты ответишь на его вопросы."
+            )
+
+        await self._reply(update, context, "\n".join(msg_lines))
+
+    async def _cmd_refreshpool(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Обновить кэш пула скиллов: /refreshpool"""
+        if not self.agent.is_master:
+            await self._reply(
+                update, context,
+                "Обновление пула доступно только master-агенту."
+            )
+            return
+
+        pool = self._get_skill_pool()
+        if pool is None:
+            await self._reply(
+                update, context,
+                "Пул скиллов не настроен (SKILL_POOL_URL не задан)."
+            )
+            return
+
+        try:
+            pool.refresh()
+        except Exception as e:
+            await self._reply(
+                update, context,
+                f"Ошибка обновления пула: {e}"
+            )
+            return
+
+        try:
+            skills = pool.list_skills()
+            await self._reply(
+                update, context,
+                f"Пул обновлён. Доступно скиллов: {len(skills)}.\n"
+                f"Каталог: /poolskills"
+            )
+        except Exception as e:
+            await self._reply(
+                update, context,
+                f"Пул склонирован, но manifest.json не читается: {e}"
             )
 
     # ── Message aggregation ──

@@ -2,9 +2,15 @@
 CLI-визард для управления агентами.
 
 Запуск:
-    python -m src.cli create-agent    # Создать нового агента
-    python -m src.cli list-agents     # Список всех агентов
-    python -m src.cli validate        # Проверить конфиги
+    python -m src.cli create-agent           # Создать нового агента
+    python -m src.cli list-agents            # Список всех агентов
+    python -m src.cli validate               # Проверить конфиги
+
+Skill Pool (маркетплейс):
+    python -m src.cli pool refresh           # Клонировать/обновить пул
+    python -m src.cli pool list              # Показать каталог пула
+    python -m src.cli pool install <skill> <agent>   # Установить скилл
+    python -m src.cli pool uninstall <skill> <agent> # Удалить скилл у агента
 """
 
 import argparse
@@ -12,6 +18,7 @@ import sys
 from pathlib import Path
 
 from .agent_manager import AgentManager
+from .skill_pool import make_pool_from_env, SkillPoolError
 
 
 def find_root() -> Path:
@@ -138,6 +145,105 @@ def cmd_create_agent(manager: AgentManager) -> None:
         sys.exit(1)
 
 
+def cmd_pool_refresh(root: Path) -> None:
+    """Клонировать/обновить публичный пул скиллов."""
+    pool = make_pool_from_env(root)
+    if pool is None:
+        print("SKILL_POOL_URL не задан. Добавь в .env и попробуй снова.")
+        sys.exit(1)
+    try:
+        pool.refresh()
+        print(f"✓ Пул обновлён: {pool.repo_dir}")
+        skills = pool.list_skills()
+        print(f"  Доступно скиллов: {len(skills)}")
+    except SkillPoolError as e:
+        print(f"✗ Ошибка: {e}")
+        sys.exit(1)
+
+
+def cmd_pool_list(root: Path) -> None:
+    """Показать каталог скиллов из пула."""
+    pool = make_pool_from_env(root)
+    if pool is None:
+        print("SKILL_POOL_URL не задан.")
+        sys.exit(1)
+    if not pool.is_available():
+        print("Пул не склонирован. Запусти: python -m src.cli pool refresh")
+        sys.exit(1)
+
+    try:
+        skills = pool.list_skills()
+    except SkillPoolError as e:
+        print(f"✗ {e}")
+        sys.exit(1)
+
+    if not skills:
+        print("В пуле нет опубликованных скиллов.")
+        return
+
+    for s in skills:
+        tags = " ".join(f"#{t}" for t in s.tags) if s.tags else ""
+        print(f"  {s.name:<25} v{s.version:<8} {s.description}")
+        if tags:
+            print(f"  {'':<25}        {tags}")
+        if s.requires_memory:
+            print(
+                f"  {'':<25}        требует: {', '.join(s.requires_memory)}"
+            )
+    print(f"\nВсего: {len(skills)}")
+
+
+def cmd_pool_install(root: Path, skill_name: str, agent_name: str) -> None:
+    """Установить скилл в агента."""
+    pool = make_pool_from_env(root)
+    if pool is None:
+        print("SKILL_POOL_URL не задан.")
+        sys.exit(1)
+    if not pool.is_available():
+        print("Пул не склонирован. Запусти: python -m src.cli pool refresh")
+        sys.exit(1)
+
+    agent_dir = root / "agents" / agent_name
+    if not agent_dir.exists():
+        print(f"✗ Агент '{agent_name}' не найден в {agent_dir}")
+        sys.exit(1)
+
+    result = pool.install_skill(skill_name, agent_dir)
+    if not result.ok:
+        print(f"✗ {result.error}")
+        sys.exit(1)
+
+    print(f"✓ Скилл '{skill_name}' установлен в {result.installed_to}")
+    if result.missing_memory:
+        print(
+            f"  Внимание: отсутствуют файлы памяти: "
+            f"{', '.join(result.missing_memory)}"
+        )
+        print(
+            "  Скилл работает, но пока не сможет читать из них. "
+            "Создай через диалог с агентом."
+        )
+
+
+def cmd_pool_uninstall(root: Path, skill_name: str, agent_name: str) -> None:
+    """Удалить скилл у агента."""
+    pool = make_pool_from_env(root)
+    if pool is None:
+        print("SKILL_POOL_URL не задан.")
+        sys.exit(1)
+
+    agent_dir = root / "agents" / agent_name
+    if not agent_dir.exists():
+        print(f"✗ Агент '{agent_name}' не найден")
+        sys.exit(1)
+
+    if pool.uninstall_skill(skill_name, agent_dir):
+        print(f"✓ Скилл '{skill_name}' удалён у агента '{agent_name}'")
+    else:
+        print(f"✗ Скилл '{skill_name}' не установлен у агента '{agent_name}'")
+        sys.exit(1)
+
+
 def main() -> None:
     """Точка входа CLI."""
     parser = argparse.ArgumentParser(
@@ -148,6 +254,18 @@ def main() -> None:
     subparsers.add_parser("create-agent", help="Создать нового агента")
     subparsers.add_parser("list-agents", help="Список всех агентов")
     subparsers.add_parser("validate", help="Проверить конфиги всех агентов")
+
+    # Pool subcommands
+    pool_parser = subparsers.add_parser("pool", help="Управление пулом скиллов")
+    pool_sub = pool_parser.add_subparsers(dest="pool_command")
+    pool_sub.add_parser("refresh", help="Клонировать/обновить пул")
+    pool_sub.add_parser("list", help="Показать каталог пула")
+    p_install = pool_sub.add_parser("install", help="Установить скилл агенту")
+    p_install.add_argument("skill", help="Имя скилла")
+    p_install.add_argument("agent", help="Имя агента")
+    p_uninstall = pool_sub.add_parser("uninstall", help="Удалить скилл у агента")
+    p_uninstall.add_argument("skill", help="Имя скилла")
+    p_uninstall.add_argument("agent", help="Имя агента")
 
     args = parser.parse_args()
 
@@ -164,6 +282,18 @@ def main() -> None:
         cmd_list_agents(manager)
     elif args.command == "validate":
         cmd_validate(manager)
+    elif args.command == "pool":
+        if not args.pool_command:
+            pool_parser.print_help()
+            sys.exit(1)
+        if args.pool_command == "refresh":
+            cmd_pool_refresh(root)
+        elif args.pool_command == "list":
+            cmd_pool_list(root)
+        elif args.pool_command == "install":
+            cmd_pool_install(root, args.skill, args.agent)
+        elif args.pool_command == "uninstall":
+            cmd_pool_uninstall(root, args.skill, args.agent)
 
 
 if __name__ == "__main__":

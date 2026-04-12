@@ -35,3 +35,6 @@ prompts/
 .DS_Store
 Thumbs.db
 .claude/worktrees/
+
+# Кэш пула скиллов (клонируется из внешнего репо my-claude-bot-skills)
+.cache/

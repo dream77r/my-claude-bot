@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "updated": "2026-04-12T00:00:00Z",
+  "spec": "agentskills.io",
+  "skills": {
+    "web-research": {
+      "file": "published/web-research.md",
+      "title": "Web Research",
+      "description": "Поиск и анализ информации в интернете через WebSearch и WebFetch",
+      "version": "1.0.0",
+      "tags": ["research", "web", "search"],
+      "requires_memory": [],
+      "author": "dream",
+      "created": "2026-04-12"
+    }
+  }
+}
