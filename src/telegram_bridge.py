@@ -383,10 +383,10 @@ class StatusMessage:
             self._thinking_timer_task = None
 
     async def _thinking_timer_loop(self) -> None:
-        """Цикл обновления 'Думаю... (10с)', '(20с)' и т.д."""
+        """Цикл обновления 'Думаю... (1с)', '(2с)' и т.д."""
         try:
             while True:
-                await asyncio.sleep(10)
+                await asyncio.sleep(1)
                 if self._thinking_start is None:
                     break
                 elapsed = int(time.monotonic() - self._thinking_start)
@@ -1921,12 +1921,12 @@ class TelegramBridge:
             if old_status:
                 await old_status.cleanup()
 
-            # Показать статус с typing keepalive
-            # Master-агент показывает tool hints, worker — только таймер
+            # Master-агент: сообщение создастся при первом tool hint
+            # Worker-агент: показываем "Думаю..." и запускаем таймер
             status = StatusMessage(chat_id, context, thread_id)
-            await status.show("Думаю...")
             status.start_typing()
             if not self.agent.is_master:
+                await status.show("Думаю...")
                 status.start_thinking_timer()
             self._status_messages[chat_id] = status
 
@@ -1955,9 +1955,9 @@ class TelegramBridge:
             await old_status.cleanup()
 
         status = StatusMessage(chat_id, context, thread_id)
-        await status.show("Думаю...")
         status.start_typing()
         if not self.agent.is_master:
+            await status.show("Думаю...")
             status.start_thinking_timer()
 
         task = asyncio.current_task()
