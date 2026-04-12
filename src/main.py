@@ -217,10 +217,12 @@ class FleetRuntime:
             model_p1 = dream_config.get("model_phase1", "haiku")
             model_p2 = dream_config.get("model_phase2", "sonnet")
             sa_config = agent.config.get("skill_advisor")
+            schema_adv_config = agent.config.get("schema_advisor")
             dream_task = asyncio.create_task(
                 dream_loop(
                     agent.agent_dir, interval, model_p1, model_p2,
                     skill_advisor_config=sa_config,
+                    schema_advisor_config=schema_adv_config,
                     bus=self.bus,
                     agent_name=agent.name,
                 )
@@ -531,11 +533,14 @@ async def async_main() -> None:
 
             # Phase 3: SkillAdvisor (для worker-агентов)
             sa_config = agent.config.get("skill_advisor")
+            # Phase 3b: SchemaAdvisor (для агентов с vault'ом, напр. archivist)
+            schema_adv_config = agent.config.get("schema_advisor")
 
             dream_task = asyncio.create_task(
                 dream_loop(
                     agent.agent_dir, interval, model_p1, model_p2,
                     skill_advisor_config=sa_config,
+                    schema_advisor_config=schema_adv_config,
                     bus=bus,
                     agent_name=agent.name,
                 )
@@ -547,6 +552,7 @@ async def async_main() -> None:
             logger.info(
                 f"Dream loop запущен для '{agent.name}' (каждые {interval}ч)"
                 + (", skill_advisor включён" if sa_config else "")
+                + (", schema_advisor включён" if schema_adv_config else "")
             )
 
     # ── Heartbeat (smart или legacy) ──

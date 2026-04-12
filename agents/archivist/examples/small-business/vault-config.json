@@ -1,0 +1,63 @@
+{
+  "initialized": true,
+  "schema_version": 1,
+  "domain": "Малый бизнес с несколькими юрлицами и точками",
+  "entities": [
+    "legal_entity",
+    "outlet",
+    "counterparty",
+    "contract",
+    "document"
+  ],
+  "document_types": [
+    "contract",
+    "act",
+    "invoice",
+    "waybill",
+    "payment-order",
+    "addendum"
+  ],
+  "tags": {
+    "relation": ["supplier", "customer", "rental", "service"],
+    "category": [
+      "food",
+      "logistics",
+      "real-estate",
+      "utilities",
+      "accounting-legal",
+      "equipment"
+    ],
+    "payment": [
+      "payment-prepaid",
+      "payment-postpaid",
+      "payment-mixed",
+      "auto-renewal"
+    ]
+  },
+  "required_fields_by_type": {
+    "legal_entity": ["inn", "kpp", "ogrn", "title"],
+    "outlet": ["address", "legal_entity"],
+    "counterparty": ["inn", "title", "relation"],
+    "contract": [
+      "doc_date",
+      "number",
+      "legal_entity",
+      "counterparty",
+      "amount",
+      "currency"
+    ],
+    "document": ["doc_date", "document_subtype", "entities"]
+  },
+  "dedup_keys": {
+    "legal_entity": ["inn"],
+    "counterparty": ["inn"],
+    "outlet": ["address"],
+    "contract": ["number", "counterparty", "legal_entity"]
+  },
+  "access": {
+    "owner": null,
+    "editors": []
+  },
+  "created": "0000-00-00",
+  "last_updated": "0000-00-00"
+}

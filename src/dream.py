@@ -140,6 +140,7 @@ async def dream_cycle(
     model_phase1: str = "haiku",
     model_phase2: str = "sonnet",
     skill_advisor_config: dict | None = None,
+    schema_advisor_config: dict | None = None,
     bus=None,
     agent_name: str = "",
 ) -> dict:
@@ -148,11 +149,12 @@ async def dream_cycle(
 
     Args:
         skill_advisor_config: конфиг Phase 3 (skill_advisor из agent.yaml)
+        schema_advisor_config: конфиг Phase 3b (schema_advisor для архивариусов)
         bus: FleetBus для отправки предложений мастеру
         agent_name: имя агента (для Phase 3)
 
     Returns:
-        dict с ключами: facts_count, summary, phase1_ok, phase2_ok, phase3_ok
+        dict с ключами: facts_count, summary, phase1_ok, phase2_ok, phase3_ok, phase3b_ok
     """
     result = {
         "facts_count": 0,
@@ -160,7 +162,9 @@ async def dream_cycle(
         "phase1_ok": False,
         "phase2_ok": False,
         "phase3_ok": False,
+        "phase3b_ok": False,
         "skill_suggestions": 0,
+        "schema_suggestions": 0,
     }
 
     # Получить необработанные сообщения
@@ -301,6 +305,35 @@ async def dream_cycle(
         except Exception as e:
             logger.error(f"Dream Phase 3 error: {e}")
 
+    # ── Phase 3b: SchemaAdvisor — предложения по улучшению схемы vault'а ──
+    # Только для агентов-архивариусов, у которых в agent.yaml включён блок
+    # schema_advisor. Работает изолированно от Phase 3, ничего не переопределяет.
+    if schema_advisor_config and schema_advisor_config.get("enabled", False):
+        try:
+            from .schema_advisor import analyze_vault, store_suggestions
+
+            sa2_model = schema_advisor_config.get("model", "haiku")
+            sa2_days = schema_advisor_config.get("analysis_days", 7)
+
+            schema_suggestions = await analyze_vault(
+                agent_dir,
+                agent_name=agent_name,
+                model=sa2_model,
+                days=sa2_days,
+            )
+
+            if schema_suggestions:
+                store_suggestions(agent_dir, schema_suggestions)
+                result["schema_suggestions"] = len(schema_suggestions)
+                result["phase3b_ok"] = True
+                logger.info(
+                    f"Dream Phase 3b: {len(schema_suggestions)} предложений по схеме"
+                )
+            else:
+                result["phase3b_ok"] = True  # OK но без предложений
+        except Exception as e:
+            logger.error(f"Dream Phase 3b (SchemaAdvisor) error: {e}")
+
     logger.info(
         f"Dream завершён: {len(facts)} фактов, "
         f"phase1={'ok' if result['phase1_ok'] else 'fail'}, "
@@ -309,6 +342,12 @@ async def dream_cycle(
             f", phase3={'ok' if result['phase3_ok'] else 'fail'} "
             f"({result['skill_suggestions']} suggestions)"
             if skill_advisor_config and skill_advisor_config.get("enabled")
+            else ""
+        )
+        + (
+            f", phase3b={'ok' if result['phase3b_ok'] else 'fail'} "
+            f"({result['schema_suggestions']} schema suggestions)"
+            if schema_advisor_config and schema_advisor_config.get("enabled")
             else ""
         )
     )
@@ -351,6 +390,7 @@ async def dream_loop(
     model_phase1: str = "haiku",
     model_phase2: str = "sonnet",
     skill_advisor_config: dict | None = None,
+    schema_advisor_config: dict | None = None,
     bus=None,
     agent_name: str = "",
 ) -> None:
@@ -360,7 +400,8 @@ async def dream_loop(
     Запускается как asyncio.Task при старте агента.
 
     Args:
-        skill_advisor_config: конфиг Phase 3 (анализ паттернов)
+        skill_advisor_config: конфиг Phase 3 (анализ паттернов скиллов)
+        schema_advisor_config: конфиг Phase 3b (анализ схемы vault'а архивариуса)
         bus: FleetBus для отправки предложений мастеру
         agent_name: имя агента
     """
@@ -369,6 +410,7 @@ async def dream_loop(
         f"Dream loop запущен для {agent_dir}, "
         f"интервал: {interval_hours}ч"
         + (", skill_advisor включён" if skill_advisor_config else "")
+        + (", schema_advisor включён" if schema_advisor_config else "")
     )
 
     while True:
@@ -379,6 +421,7 @@ async def dream_loop(
                 model_phase1,
                 model_phase2,
                 skill_advisor_config=skill_advisor_config,
+                schema_advisor_config=schema_advisor_config,
                 bus=bus,
                 agent_name=agent_name,
             )

@@ -1,0 +1,15 @@
+{
+  "initialized": false,
+  "schema_version": 1,
+  "domain": "",
+  "entities": [],
+  "document_types": [],
+  "tags": {},
+  "required_fields_by_type": {},
+  "access": {
+    "owner": null,
+    "editors": []
+  },
+  "created": null,
+  "last_updated": null
+}
