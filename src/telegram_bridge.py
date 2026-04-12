@@ -1921,11 +1921,13 @@ class TelegramBridge:
             if old_status:
                 await old_status.cleanup()
 
-            # Показать статус с typing keepalive и таймером
+            # Показать статус с typing keepalive
+            # Master-агент показывает tool hints, worker — только таймер
             status = StatusMessage(chat_id, context, thread_id)
             await status.show("Думаю...")
             status.start_typing()
-            status.start_thinking_timer()
+            if not self.agent.is_master:
+                status.start_thinking_timer()
             self._status_messages[chat_id] = status
 
             # Опубликовать в bus → orchestrator → agent_worker
@@ -1955,7 +1957,8 @@ class TelegramBridge:
         status = StatusMessage(chat_id, context, thread_id)
         await status.show("Думаю...")
         status.start_typing()
-        status.start_thinking_timer()
+        if not self.agent.is_master:
+            status.start_thinking_timer()
 
         task = asyncio.current_task()
         self._active_tasks[chat_id] = task
@@ -1965,11 +1968,17 @@ class TelegramBridge:
             preview = text[:TG_MESSAGE_LIMIT - 20] + ("\n..." if len(text) > TG_MESSAGE_LIMIT - 20 else "")
             await status.show(preview, streaming=True)
 
+        async def _on_tool_use(hint: str) -> None:
+            # Master-агент показывает tool hints, worker — нет
+            if self.agent.is_master:
+                await status.show(f"⏳ {hint}")
+
         try:
             response = await self.agent.call_claude(
                 combined,
                 files or None,
                 self.semaphore,
+                on_tool_use=_on_tool_use,
                 on_text_delta=_on_text_delta,
                 group_chat_id=chat_id if is_group else None,
             )
@@ -2474,8 +2483,11 @@ class TelegramBridge:
                     pass
 
                 elif event == "tool_use":
-                    # Не показываем tool hints в чате — только таймер "Думаю..."
-                    pass
+                    # Master-агент показывает tool hints, worker — только таймер
+                    if self.agent.is_master:
+                        status = self._status_messages.get(chat_id)
+                        if status:
+                            await status.show(f"⏳ {msg.content}")
 
                 elif event == "text_delta":
                     # Streaming: показать накопленный текст (быстрый интервал)
