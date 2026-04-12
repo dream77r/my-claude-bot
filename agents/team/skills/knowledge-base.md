@@ -1,5 +1,11 @@
 ---
+name: knowledge-base
+version: 1.0.0
 description: "База знаний команды: хранение и поиск информации"
+license: MIT
+when_to_use: "When someone asks about past decisions, team knowledge, or shares important info to remember"
+tags: [knowledge, team, memory, wiki]
+requires_memory: []
 requirements:
   commands: []
   env: []

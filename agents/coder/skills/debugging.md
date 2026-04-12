@@ -1,5 +1,11 @@
 ---
+name: debugging
+version: 1.0.0
 description: "Отладка: поиск и исправление багов"
+license: MIT
+when_to_use: "When user describes a bug, error, or unexpected behavior"
+tags: [coding, debugging, troubleshooting]
+requires_memory: []
 requirements:
   commands: []
   env: []

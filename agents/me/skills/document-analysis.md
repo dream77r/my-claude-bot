@@ -1,5 +1,11 @@
 ---
+name: document-analysis
+version: 1.0.0
 description: "Анализ документов: PDF, DOCX, TXT, изображения"
+license: MIT
+when_to_use: "When user sends a file (PDF, DOCX, TXT, image) or asks to analyze a document"
+tags: [documents, analysis, pdf, ocr]
+requires_memory: []
 requirements:
   commands: []
   env: []

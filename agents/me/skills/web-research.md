@@ -1,5 +1,11 @@
 ---
+name: web-research
+version: 1.0.0
 description: "Поиск и анализ информации в интернете"
+license: MIT
+when_to_use: "When user asks to find info, research a topic, verify a fact, or needs current data"
+tags: [research, web, search]
+requires_memory: []
 requirements:
   commands: ["curl"]
   env: []

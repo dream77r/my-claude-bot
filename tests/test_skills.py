@@ -171,3 +171,75 @@ class TestLoadSkills:
         # meta is None → нет фильтрации → загружается
         prompt = agent_with_skills._load_skills()
         assert "Legacy" in prompt
+
+
+class TestAgentSkillsIoFormat:
+    """
+    Контракт-тесты для agentskills.io-совместимого frontmatter.
+    Проверяем что все реальные скиллы в agents/*/skills/ соответствуют формату.
+    """
+
+    REQUIRED_FIELDS = ["name", "version", "description", "license", "when_to_use", "tags", "requires_memory"]
+
+    @pytest.fixture
+    def all_skill_files(self):
+        root = Path(__file__).parent.parent / "agents"
+        return sorted(root.glob("*/skills/*.md"))
+
+    def test_all_skills_have_frontmatter(self, all_skill_files):
+        assert len(all_skill_files) > 0, "Не найдено ни одного скилла"
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            assert meta is not None, f"{skill_file.name}: нет frontmatter"
+
+    def test_all_skills_have_required_fields(self, all_skill_files):
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            for field in self.REQUIRED_FIELDS:
+                assert field in meta, f"{skill_file.name}: отсутствует поле '{field}'"
+
+    def test_name_matches_filename(self, all_skill_files):
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            assert meta["name"] == skill_file.stem, (
+                f"{skill_file.name}: name='{meta['name']}' не совпадает с именем файла"
+            )
+
+    def test_version_is_semver(self, all_skill_files):
+        import re
+        semver = re.compile(r"^\d+\.\d+\.\d+$")
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            assert semver.match(str(meta["version"])), (
+                f"{skill_file.name}: version='{meta['version']}' не semver"
+            )
+
+    def test_tags_is_list(self, all_skill_files):
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            assert isinstance(meta["tags"], list), f"{skill_file.name}: tags не список"
+            assert len(meta["tags"]) > 0, f"{skill_file.name}: tags пустой"
+
+    def test_requires_memory_is_list(self, all_skill_files):
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            assert isinstance(meta["requires_memory"], list), (
+                f"{skill_file.name}: requires_memory не список"
+            )
+
+    def test_when_to_use_is_string(self, all_skill_files):
+        for skill_file in all_skill_files:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, _ = Agent.parse_skill_frontmatter(text)
+            assert isinstance(meta["when_to_use"], str), (
+                f"{skill_file.name}: when_to_use не строка"
+            )
+            assert len(meta["when_to_use"]) > 10, (
+                f"{skill_file.name}: when_to_use слишком короткий"
+            )
