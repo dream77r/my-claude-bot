@@ -2,7 +2,7 @@
 
 [🇷🇺 Русская версия](README.ru.md)
 
-**What it is in 5 sentences.** My Claude Bot turns your $20/month Claude Pro subscription into a fleet of AI Telegram agents — strategic advisor, coder, team hub, and document archivist out of the box, plus unlimited custom agents, each as a separate Telegram bot with its own personality and memory. Agents share a MessageBus, remember everything in git-versioned wiki memory, and self-improve overnight via Dream cycles that analyse usage and propose new skills or schema changes. Works in personal chats and groups, handles files and voice messages, installs community skills from a shared marketplace, and runs unattended on any cheap VPS. No API bills, no per-call charges — install with one command, update with one command. If you want a persistent personal AI team that costs $20/month total and lives inside Telegram where you already are, this is for you.
+**What it is in 5 sentences.** My Claude Bot turns your Claude Pro ($20/mo) or Claude Max ($100/mo, $200/mo) subscription into a fleet of AI Telegram agents — strategic advisor, coder, team hub, and document archivist out of the box, plus unlimited custom agents, each as a separate Telegram bot with its own personality and memory. Agents share a MessageBus, remember everything in git-versioned wiki memory, and self-improve overnight via Dream cycles that analyse usage and propose new skills or schema changes. Works in personal chats and groups, handles files and voice messages, installs community skills from a shared marketplace, and runs unattended on any cheap VPS. No API bills, no per-call charges — install with one command, update with one command. If you want a persistent personal AI team that lives inside Telegram where you already are and costs a fixed monthly fee with no surprises, this is for you.
 
 ```
           Telegram  (DMs + group chats + forum topics)
@@ -21,8 +21,8 @@
            │                 │                  │
      ┌─────▼──────┐   ┌──────▼──────┐   ┌───────▼───────┐
      │ Claude Pro │   │ Wiki memory │   │   Skills +    │
-     │  $20 / mo  │   │ per agent,  │   │ community Pool│
-     │ (unlimited)│   │ git-backed  │   │  marketplace  │
+     │   or Max   │   │ per agent,  │   │ community Pool│
+     │ (flat fee) │   │ git-backed  │   │  marketplace  │
      └────────────┘   └─────────────┘   └───────────────┘
 
     Background: Dream (4 phases) · Knowledge Graph · Smart Heartbeat · Cron
@@ -72,7 +72,7 @@ The script will:
 
 Open Telegram and message your bot — it handles everything else (onboarding, language, settings).
 
-**Prerequisites:** Python 3.10+, Claude CLI (installed and authorized), Claude Pro subscription.
+**Prerequisites:** Python 3.10+, Claude CLI (installed and authorized), Claude Pro or Claude Max subscription.
 
 ## Updating
 
@@ -208,7 +208,7 @@ Supported cron expressions: `*`, `*/N`, `N-M`, `N,M,K`, exact values. Format: `m
 
 - Python 3.10+ or Docker
 - Claude CLI (installed and authorized)
-- Claude Pro subscription
+- Claude Pro or Claude Max subscription (any tier)
 - Telegram bot (create via @BotFather)
 - Deepgram API key (optional, for voice)
 - Node.js/npx (optional, for MCP servers)
