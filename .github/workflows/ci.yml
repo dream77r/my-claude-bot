@@ -29,7 +29,7 @@ jobs:
 
       - name: Lint with ruff (new modules)
         run: |
-          ruff check src/input_sanitizer.py src/ssrf_protection.py src/metrics.py src/checkpoint.py src/audit.py --select E,F,W --ignore E501
+          ruff check src/input_sanitizer.py src/ssrf_protection.py src/metrics.py src/checkpoint.py src/audit.py src/mcp_skill_marketplace.py --select E,F,W --ignore E501
 
       - name: Run tests
         run: |

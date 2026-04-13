@@ -69,6 +69,31 @@ class Agent:
         self.claude_flags: list[str] = self.config.get("claude_flags", [])
         self.mcp_servers: dict = self.config.get("mcp_servers", {})
 
+        # Skill Marketplace MCP — автоматически монтируется всем воркерам.
+        # Даёт право самостоятельно устанавливать скиллы из пула (без создания).
+        # Target directory жёстко захвачена в closure → LLM не может подменить.
+        marketplace_cfg = self.config.get("skill_marketplace_mcp", {})
+        marketplace_default = not self.is_master
+        if marketplace_cfg.get("enabled", marketplace_default):
+            from .mcp_skill_marketplace import build_skill_marketplace_server
+            try:
+                mp_server = build_skill_marketplace_server(
+                    Path(self.agent_dir).resolve()
+                )
+                if mp_server is not None:
+                    self.mcp_servers = {
+                        **self.mcp_servers,
+                        "skill_marketplace": mp_server,
+                    }
+                    logger.info(
+                        f"Agent '{self.name}': skill_marketplace MCP подключён"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Agent '{self.name}': не удалось подключить "
+                    f"skill_marketplace MCP: {e}"
+                )
+
         # Очередь сообщений (сериализация обработки)
         self.queue: asyncio.Queue = asyncio.Queue()
 
@@ -734,6 +759,17 @@ class Agent:
 
         # Allowed tools
         allowed_tools = self._parse_allowed_tools()
+
+        # Добавить MCP tool names skill_marketplace если сервер подключён.
+        # Без этого Claude CLI отклонит вызов: allowed_tools — whitelist.
+        if "skill_marketplace" in self.mcp_servers:
+            from .mcp_skill_marketplace import ALLOWED_TOOL_NAMES as _MP_TOOLS
+            if allowed_tools is None:
+                allowed_tools = list(_MP_TOOLS)
+            else:
+                allowed_tools = list(allowed_tools) + [
+                    t for t in _MP_TOOLS if t not in allowed_tools
+                ]
 
         # Memory path для cwd
         memory_path = Path(self.agent_dir) / "memory"
