@@ -71,7 +71,12 @@ async def download_file(bot: Bot, file_id: str, agent_dir: str) -> str:
     return str(local_path)
 
 
-async def send_file(bot: Bot, chat_id: int, file_path: str) -> None:
+async def send_file(
+    bot: Bot,
+    chat_id: int,
+    file_path: str,
+    message_thread_id: int | None = None,
+) -> None:
     """
     Отправить файл в Telegram чат.
 
@@ -79,6 +84,7 @@ async def send_file(bot: Bot, chat_id: int, file_path: str) -> None:
         bot: Telegram Bot instance
         chat_id: ID чата
         file_path: путь к локальному файлу
+        message_thread_id: ID топика в группе (для отправки в нужный топик)
 
     Raises:
         FileNotFoundError: если файл не найден
@@ -99,8 +105,9 @@ async def send_file(bot: Bot, chat_id: int, file_path: str) -> None:
                 chat_id=chat_id,
                 document=f,
                 filename=path.name,
+                message_thread_id=message_thread_id,
             )
-        logger.info(f"Файл отправлен: {path.name} → chat {chat_id}")
+        logger.info(f"Файл отправлен: {path.name} → chat {chat_id} thread {message_thread_id}")
     except Exception as e:
         raise RuntimeError(f"Не удалось отправить файл: {e}") from e
 

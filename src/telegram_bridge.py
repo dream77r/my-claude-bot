@@ -2239,7 +2239,7 @@ class TelegramBridge:
             if outbox_files:
                 for fpath in outbox_files:
                     try:
-                        await send_file(context.bot, chat_id, fpath)
+                        await send_file(context.bot, chat_id, fpath, message_thread_id=thread_id)
                     except Exception as fe:
                         logger.error(f"Outbox send error: {fe}")
                 clear_outbox(self.agent.agent_dir)
@@ -2842,8 +2842,8 @@ class TelegramBridge:
         """Отправить файлы из outbox в Telegram чат."""
         for fpath in file_paths:
             try:
-                await send_file(app.bot, chat_id, fpath)
-                logger.info(f"Outbox файл отправлен: {fpath} → {chat_id}")
+                await send_file(app.bot, chat_id, fpath, message_thread_id=message_thread_id)
+                logger.info(f"Outbox файл отправлен: {fpath} → {chat_id} thread {message_thread_id}")
             except Exception as e:
                 logger.error(f"Outbox send error ({fpath}): {e}")
                 try:
