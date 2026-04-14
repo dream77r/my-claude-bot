@@ -24,6 +24,7 @@ from .cron import cron_loop
 from .delegation import DelegationManager
 from .dispatcher import dispatcher_loop
 from .dream import dream_loop
+from .github_sync import github_sync_loop
 from .knowledge_graph import nightly_graph_loop
 from .heartbeat import heartbeat_loop
 from .orchestrator import Orchestrator
@@ -646,6 +647,13 @@ async def async_main() -> None:
                 f"{run_hour:02d}:{run_minute:02d} UTC, "
                 f"L3: ежедневно {daily_phase}д → каждые {regular}д"
             )
+
+    # ── GitHub Sync (ночное резервное копирование) ──
+    github_sync_task = asyncio.create_task(
+        github_sync_loop(root, run_hour=3, run_minute=0)
+    )
+    tasks.append(github_sync_task)
+    logger.info("GitHub Sync loop запущен: ежедневно в 03:00 UTC")
 
     logger.info(
         f"Fleet запущен: {len(agents)} агентов, "

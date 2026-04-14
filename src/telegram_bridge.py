@@ -463,6 +463,9 @@ class TelegramBridge:
         # Thread ID (топики) для каждого chat_id — для ответа в правильном топике
         self._thread_ids: dict[int, int | None] = {}
 
+        # User ID для каждого chat_id — для per-user директорий в _flush_buffer
+        self._user_ids: dict[int, int | None] = {}
+
         # Pending group setup: owner_dm_chat_id → group_chat_id
         # Когда владелец нажал "Настроить" — ждём текст с правилами
         self._pending_group_setups: dict[int, int] = {}
@@ -2319,8 +2322,11 @@ class TelegramBridge:
         thread_id = self._thread_ids.pop(chat_id, None)
 
         # Определить директорию пользователя (per-user в multi_user mode)
-        user_id = update.effective_user.id if update.effective_user else None
-        user_dir = self._effective_dir(update)
+        user_id = self._user_ids.pop(chat_id, None)
+        if self.agent.is_multi_user and user_id:
+            user_dir = self.agent.get_effective_dir(user_id)
+        else:
+            user_dir = self.agent.agent_dir
 
         # Если онбординг не пройден — добавить инструкцию сохранить профиль (только DM)
         if not is_group and memory.is_onboarding_needed(user_dir) and not memory.is_onboarding_done(user_dir):
@@ -2460,6 +2466,7 @@ class TelegramBridge:
         text: str,
         file_path: str | None,
         context: ContextTypes.DEFAULT_TYPE,
+        user_id: int | None = None,
     ) -> None:
         """Добавить сообщение в буфер и (пере)запустить таймер."""
         if chat_id in self._buffers:
@@ -2473,6 +2480,9 @@ class TelegramBridge:
             messages.append(text)
         if file_path:
             files.append(file_path)
+
+        if user_id is not None:
+            self._user_ids[chat_id] = user_id
 
         flush_task = asyncio.create_task(
             self._flush_buffer(chat_id, context)
@@ -2605,7 +2615,7 @@ class TelegramBridge:
             sender_name = self._get_sender_name(update)
             text = f"[{sender_name}]: {text}"
 
-        self._add_to_buffer(chat_id, text, None, context)
+        self._add_to_buffer(chat_id, text, None, context, user_id=update.effective_user.id if update.effective_user else None)
 
     async def _handle_document(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2637,7 +2647,7 @@ class TelegramBridge:
             file_path = await download_file(
                 context.bot, doc.file_id, self._effective_dir(update)
             )
-            self._add_to_buffer(chat_id, caption, file_path, context)
+            self._add_to_buffer(chat_id, caption, file_path, context, user_id=update.effective_user.id if update.effective_user else None)
         except Exception as e:
             logger.error(f"File download error: {e}")
             await update.message.reply_text("Не удалось скачать файл.")
@@ -2668,7 +2678,7 @@ class TelegramBridge:
             file_path = await download_file(
                 context.bot, photo.file_id, self._effective_dir(update)
             )
-            self._add_to_buffer(chat_id, caption, file_path, context)
+            self._add_to_buffer(chat_id, caption, file_path, context, user_id=update.effective_user.id if update.effective_user else None)
         except Exception as e:
             logger.error(f"Photo download error: {e}")
             await update.message.reply_text("Не удалось скачать фото.")
@@ -2722,7 +2732,7 @@ class TelegramBridge:
 
             # Добавить в буфер как текст (с пометкой что это голосовое)
             text = f"[голосовое сообщение]: {transcript}"
-            self._add_to_buffer(chat_id, text, None, context)
+            self._add_to_buffer(chat_id, text, None, context, user_id=update.effective_user.id if update.effective_user else None)
 
         except ValueError as e:
             logger.error(f"Voice config error: {e}")
