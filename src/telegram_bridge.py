@@ -2638,6 +2638,12 @@ class TelegramBridge:
             if not self._is_bot_mentioned(update, context):
                 return
 
+        thread_id = getattr(update.message, "message_thread_id", None)
+        if is_group and not self._is_topic_allowed(chat_id, thread_id):
+            return
+        if thread_id:
+            self._thread_ids[chat_id] = thread_id
+
         # Проверка размера (20MB лимит)
         if doc.file_size and doc.file_size > 20 * 1024 * 1024:
             await update.message.reply_text("Файл слишком большой (макс. 20MB).")
@@ -2672,6 +2678,12 @@ class TelegramBridge:
             if not self._is_bot_mentioned(update, context):
                 return
 
+        thread_id = getattr(update.message, "message_thread_id", None)
+        if is_group and not self._is_topic_allowed(chat_id, thread_id):
+            return
+        if thread_id:
+            self._thread_ids[chat_id] = thread_id
+
         photo = update.message.photo[-1]  # Наибольшее разрешение
 
         try:
@@ -2701,6 +2713,12 @@ class TelegramBridge:
             )
             if not self._is_bot_mentioned(update, context):
                 return
+
+        thread_id = getattr(update.message, "message_thread_id", None)
+        if is_group and not self._is_topic_allowed(chat_id, thread_id):
+            return
+        if thread_id:
+            self._thread_ids[chat_id] = thread_id
 
         # Проверить что Deepgram настроен
         master_dir = self._get_master_agent_dir()
