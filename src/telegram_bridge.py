@@ -14,6 +14,7 @@ Telegram Bridge — хэндлеры для Telegram-бота.
 
 import asyncio
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -82,6 +83,7 @@ BOT_COMMANDS = [
     BotCommand("installskill", "Установить скилл из пула"),
     BotCommand("refreshpool", "Обновить кэш пула скиллов"),
     BotCommand("restart", "Перезапустить платформу"),
+    BotCommand("newkey", "Создать ключ доступа для пользователя"),
 ]
 
 # Доступные модели Claude
@@ -539,6 +541,14 @@ class TelegramBridge:
         router.exact("/installskill", self._cmd_installskill)
         router.exact("/refreshpool", self._cmd_refreshpool)
 
+        # Multi-user access key commands
+        router.exact("/newkey", self._cmd_newkey)
+
+        # GitHub Backup commands
+        router.exact("/backup_link", self._cmd_backup_link)
+        router.exact("/backup_now", self._cmd_backup_now)
+        router.exact("/backup_status", self._cmd_backup_status)
+
         return router
 
     def build_app(self) -> Application:
@@ -593,13 +603,15 @@ class TelegramBridge:
         """Проверить авторизацию пользователя.
 
         В группах: при @mention разрешаем всем участникам.
-        В DM: только allowed_users.
+        В DM: только зарегистрированные пользователи (multi_user) или allowed_users.
         """
         user = update.effective_user
         if not user:
             return False
         if self._is_group_chat(update):
             return True  # В группах auth по-другому — отвечаем любому при mention
+        if self.agent.is_multi_user:
+            return self.agent.is_user_registered(user.id)
         return self.agent.is_user_allowed(user.id)
 
     def _get_sender_name(self, update: Update) -> str:
@@ -612,6 +624,12 @@ class TelegramBridge:
     def _lang(self) -> str:
         """Получить язык пользователя из settings."""
         return memory.get_setting(self.agent.agent_dir, "language") or "ru"
+
+    def _effective_dir(self, update: Update) -> str:
+        """Return per-user directory in multi_user mode, otherwise agent_dir."""
+        if self.agent.is_multi_user and update.effective_user:
+            return self.agent.get_effective_dir(update.effective_user.id)
+        return self.agent.agent_dir
 
     # Команды, доступные только владельцу (allowed_users) в группах
     _OWNER_ONLY_COMMANDS = {
@@ -648,9 +666,14 @@ class TelegramBridge:
                     await update.message.reply_text("Эта команда доступна только владельцу.")
                     return
         else:
-            # В DM: /start пропускает auth (для авто-регистрации нового клиента)
+            # В DM: /start пропускает auth (для регистрации нового клиента)
             cmd = text.split()[0].split("@")[0].lower()
             if cmd != "/start" and not self._check_auth(update):
+                if self.agent.is_multi_user:
+                    await update.message.reply_text(
+                        "Доступ к этому боту — по приглашению. "
+                        "Запросите ключ у владельца и используйте команду /start <ключ>."
+                    )
                 return
 
         result = self.router.route(text)
@@ -672,17 +695,27 @@ class TelegramBridge:
 
         # Проверить авторизацию
         user = query.from_user
-        if not user or not self.agent.is_user_allowed(user.id):
+        if not user:
+            await query.answer("Нет доступа", show_alert=True)
+            return
+        if self.agent.is_multi_user:
+            if not self.agent.is_user_registered(user.id):
+                await query.answer("Нет доступа", show_alert=True)
+                return
+        elif not self.agent.is_user_allowed(user.id):
             await query.answer("Нет доступа", show_alert=True)
             return
 
         # Убрать "часики" на кнопке
         await query.answer()
 
+        # Определить директорию пользователя
+        user_dir = self.agent.get_effective_dir(user.id)
+
         # Выбор языка: lang:en, lang:ru
         if query.data.startswith("lang:"):
             lang = query.data[5:]
-            memory.set_setting(self.agent.agent_dir, "language", lang)
+            memory.set_setting(user_dir, "language", lang)
             try:
                 confirm = {"en": "English selected! Let's get started.", "ru": "Отлично! Давай начнём."}
                 await query.edit_message_text(confirm.get(lang, confirm["en"]))
@@ -696,7 +729,7 @@ class TelegramBridge:
         if query.data.startswith("model:"):
             model_id = query.data[6:]
             if model_id in CLAUDE_MODELS:
-                memory.set_setting(self.agent.agent_dir, "claude_model", model_id)
+                memory.set_setting(user_dir, "claude_model", model_id)
                 # Обновить кнопки — показать галочку на выбранной модели
                 try:
                     await query.edit_message_text(
@@ -774,27 +807,73 @@ class TelegramBridge:
     async def _cmd_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
-        # Авто-регистрация: первый клиент получает доступ, остальным — отказ
         user = update.effective_user
+
+        # ── Multi-user mode: key-based registration ──
+        if self.agent.is_multi_user and user:
+            if self.agent.is_user_registered(user.id):
+                # Already registered — normal welcome
+                user_dir = self.agent.get_effective_dir(user.id)
+                if memory.is_onboarding_needed(user_dir):
+                    if not memory.get_setting(user_dir, "language"):
+                        await self._ask_language(update, context)
+                    else:
+                        await self._start_onboarding(update, context)
+                else:
+                    lang = self._lang()
+                    await update.message.reply_text(
+                        t("start_greeting", lang, display_name=self.agent.display_name),
+                        reply_markup=_main_keyboard(),
+                    )
+                return
+
+            key = args.strip() if args else ""
+            if not key:
+                await update.message.reply_text(
+                    "Доступ к этому боту — по приглашению.\n"
+                    "Запросите ключ у владельца и откройте ссылку из приглашения."
+                )
+                return
+
+            valid, reason = self.agent.validate_key(key)
+            if not valid:
+                if reason == "used":
+                    await update.message.reply_text(
+                        "Этот ключ уже использован другим пользователем."
+                    )
+                else:
+                    await update.message.reply_text(
+                        "Ключ не найден или недействителен. Запросите новый у владельца."
+                    )
+                return
+
+            # Activate key and create user directory
+            self.agent.activate_key(key, user.id)
+            user_dir = self.agent.get_effective_dir(user.id)
+            logger.info(f"New user {user.id} ({user.first_name}) registered via key")
+
+            if not memory.get_setting(user_dir, "language"):
+                await self._ask_language(update, context)
+            else:
+                await self._start_onboarding(update, context)
+            return
+
+        # ── Single-user mode: авто-регистрация первого клиента ──
         if user and self.agent.allowed_users:
             if user.id not in self.agent.allowed_users:
-                # Проверить есть ли уже клиент (не-FOUNDER)
                 import os
                 founder_id = int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
                 clients = [uid for uid in self.agent.allowed_users if uid != founder_id]
                 if clients:
-                    # Уже есть клиент — отказать
                     await update.message.reply_text(
                         "Этот бот уже привязан к другому пользователю."
                     )
                     return
-                # Первый клиент — добавить
                 self.agent.allowed_users.append(user.id)
                 self._save_allowed_users(user.id, user.first_name or "")
 
         # Проверить нужен ли онбординг (проверяем profile.md каждый раз)
         if memory.is_onboarding_needed(self.agent.agent_dir):
-            # Если язык ещё не выбран — сначала спрашиваем язык
             if not memory.get_setting(self.agent.agent_dir, "language"):
                 await self._ask_language(update, context)
             else:
@@ -809,6 +888,32 @@ class TelegramBridge:
                 text=t("start_greeting", lang, display_name=self.agent.display_name),
                 reply_markup=_main_keyboard(),
             )
+
+    async def _cmd_newkey(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Generate a new single-use access key (owner only)."""
+        if not self.agent.is_multi_user:
+            await self._reply(
+                update, context,
+                "Мультипользовательский режим отключён. "
+                "Добавьте multi_user: true в agent.yaml чтобы использовать ключи доступа."
+            )
+            return
+
+        user = update.effective_user
+        if not user or not self.agent.is_user_allowed(user.id):
+            await self._reply(update, context, "Только владелец может создавать ключи доступа.")
+            return
+
+        key = self.agent.generate_key()
+        bot_info = await context.bot.get_me()
+        link = f"https://t.me/{bot_info.username}?start={key}"
+        await self._reply(
+            update, context,
+            f"Ключ создан. Отправьте эту ссылку пользователю:\n\n{link}\n\n"
+            "Ключ одноразовый — после использования сгорает."
+        )
 
     async def _ask_language(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -842,12 +947,15 @@ class TelegramBridge:
         await status.show(t("starting", lang))
 
         try:
+            user = update.effective_user
+            uid = user.id if user else None
             response = await self.agent.call_claude(
                 onboarding_prompt,
                 None,
                 self.semaphore,
+                user_id=uid,
             )
-            memory.log_message(self.agent.agent_dir, "assistant", response)
+            memory.log_message(self._effective_dir(update), "assistant", response)
             await status.cleanup()
             await send_long_message(chat_id, response, context)
         except Exception as e:
@@ -893,7 +1001,7 @@ class TelegramBridge:
     async def _cmd_newsession(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
-        memory.clear_session_id(self.agent.agent_dir)
+        memory.clear_session_id(self._effective_dir(update))
         await self._reply(
             update, context,
             "Новая сессия начата. Контекст предыдущей сессии сброшен."
@@ -949,7 +1057,8 @@ class TelegramBridge:
         """Показать статус агента."""
         chat_id = update.effective_chat.id
         is_busy = chat_id in self._active_tasks and not self._active_tasks[chat_id].done()
-        session = memory.get_session_id(self.agent.agent_dir)
+        user_dir = self._effective_dir(update)
+        session = memory.get_session_id(user_dir)
 
         status_lines = [
             f"Агент: {self.agent.display_name}",
@@ -958,7 +1067,7 @@ class TelegramBridge:
         ]
 
         # Git info
-        log_entries = memory.git_log(self.agent.agent_dir, limit=1)
+        log_entries = memory.git_log(user_dir, limit=1)
         if log_entries:
             last = log_entries[0]
             status_lines.append(f"Последний бэкап памяти: {last['date']}")
@@ -977,7 +1086,7 @@ class TelegramBridge:
             days = int(args.strip())
             days = max(1, min(days, 90))  # Лимит 1-90 дней
 
-        stats = get_stats(self.agent.agent_dir, days=days)
+        stats = get_stats(self._effective_dir(update), days=days)
         text = format_stats(stats)
         await self._reply(update, context, text)
 
@@ -985,7 +1094,7 @@ class TelegramBridge:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
         """Показать историю изменений памяти."""
-        entries = memory.git_log(self.agent.agent_dir, limit=10)
+        entries = memory.git_log(self._effective_dir(update), limit=10)
 
         if not entries:
             await self._reply(
@@ -1006,7 +1115,7 @@ class TelegramBridge:
         """Откатить память к предыдущей версии."""
         commit_hash = args.strip() if args.strip() else None
 
-        if memory.git_restore(self.agent.agent_dir, commit_hash):
+        if memory.git_restore(self._effective_dir(update), commit_hash):
             target = commit_hash or "предыдущая версия"
             await self._reply(
                 update, context,
@@ -1030,7 +1139,7 @@ class TelegramBridge:
         await status.show("Запускаю Dream-обработку памяти...")
 
         try:
-            result = await dream_cycle(self.agent.agent_dir)
+            result = await dream_cycle(self._effective_dir(update))
             await status.cleanup()
 
             lines = ["Dream-цикл завершён:"]
@@ -1058,7 +1167,7 @@ class TelegramBridge:
         """Показать / сменить модель Claude."""
         # Текущая модель: settings override → agent.yaml default
         current = (
-            memory.get_setting(self.agent.agent_dir, "claude_model")
+            memory.get_setting(self._effective_dir(update), "claude_model")
             or self.agent.claude_model
         )
 
@@ -2106,6 +2215,83 @@ class TelegramBridge:
                 f"Пул склонирован, но manifest.json не читается: {e}"
             )
 
+    # ── GitHub Backup commands ──
+
+    async def _cmd_backup_link(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Показать ссылку на GitHub бэкап: /backup_link"""
+        from .github_sync import get_backup_url
+        project_root = Path(self.agent.agent_dir).parent.parent
+        url = get_backup_url(project_root)
+        if not url:
+            await self._reply(
+                update, context,
+                "GitHub Sync не настроен. Добавь GITHUB_SYNC_REPO в .env"
+            )
+            return
+        await self._reply(update, context, f"Ссылка на бэкап:\n{url}")
+
+    async def _cmd_backup_now(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Запустить бэкап прямо сейчас: /backup_now (только для founder)"""
+        founder_id = int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+        user_id = update.effective_user.id if update.effective_user else 0
+        if founder_id and user_id != founder_id:
+            await self._reply(update, context, "Только владелец может запускать бэкап вручную.")
+            return
+
+        from .github_sync import run_github_sync
+        project_root = Path(self.agent.agent_dir).parent.parent
+
+        await self._reply(update, context, "Запускаю бэкап... (займёт ~30 секунд)")
+        result = await run_github_sync(project_root)
+
+        if result["success"]:
+            agents_str = ", ".join(result.get("agents", []))
+            await self._reply(
+                update, context,
+                f"{result['message']}\n"
+                f"Агенты: {agents_str}\n"
+                f"Время: {result.get('timestamp', '')}\n"
+                f"Ссылка: {result.get('repo_url', '')}"
+            )
+        else:
+            await self._reply(update, context, f"Ошибка бэкапа: {result['message']}")
+
+    async def _cmd_backup_status(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Показать статус последнего бэкапа: /backup_status"""
+        from .github_sync import get_last_sync_info, get_backup_url
+        project_root = Path(self.agent.agent_dir).parent.parent
+        info = get_last_sync_info(project_root)
+        url = get_backup_url(project_root)
+
+        if not info:
+            repo_configured = bool(os.getenv("GITHUB_SYNC_REPO"))
+            if not repo_configured:
+                await self._reply(
+                    update, context,
+                    "GitHub Sync не настроен. Добавь GITHUB_SYNC_REPO и GITHUB_SYNC_TOKEN в .env"
+                )
+            else:
+                await self._reply(
+                    update, context,
+                    "Бэкап ещё не выполнялся. Следующий — сегодня в 03:00 UTC.\n"
+                    "Или запусти сейчас: /backup_now"
+                )
+            return
+
+        agents_str = ", ".join(info.get("agents", []))
+        await self._reply(
+            update, context,
+            f"Последний бэкап: {info.get('last_sync', 'неизвестно')}\n"
+            f"Агенты: {agents_str}\n"
+            f"Ссылка: {url or 'не настроено'}"
+        )
+
     # ── Message aggregation ──
 
     async def _flush_buffer(
@@ -2132,16 +2318,20 @@ class TelegramBridge:
         # Thread ID для топиков
         thread_id = self._thread_ids.pop(chat_id, None)
 
+        # Определить директорию пользователя (per-user в multi_user mode)
+        user_id = update.effective_user.id if update.effective_user else None
+        user_dir = self._effective_dir(update)
+
         # Если онбординг не пройден — добавить инструкцию сохранить профиль (только DM)
-        if not is_group and memory.is_onboarding_needed(self.agent.agent_dir) and not memory.is_onboarding_done(self.agent.agent_dir):
+        if not is_group and memory.is_onboarding_needed(user_dir) and not memory.is_onboarding_done(user_dir):
             lang = self._lang()
             combined = combined + t("onboarding_save_instruction", lang)
-            memory.mark_onboarding_done(self.agent.agent_dir)
+            memory.mark_onboarding_done(user_dir)
 
         # Логируем входящее сообщение (в DM — в личный лог, в группах уже залогировано)
         if not is_group:
             memory.log_message(
-                self.agent.agent_dir, "user", "\n".join(messages), files or None
+                user_dir, "user", "\n".join(messages), files or None
             )
 
         # ── Режим MessageBus ──
@@ -2211,16 +2401,17 @@ class TelegramBridge:
                 on_tool_use=_on_tool_use,
                 on_text_delta=_on_text_delta,
                 group_chat_id=chat_id if is_group else None,
+                user_id=user_id,
             )
 
             # В группах ответ логируется в groups/{chat_id}/daily/;
             # в персональный daily пишем только DM-ответы (симметрично ~2142).
             if not is_group:
-                memory.log_message(self.agent.agent_dir, "assistant", response)
+                memory.log_message(user_dir, "assistant", response)
 
             # Проверить outbox файлы
             from .file_handler import scan_outbox
-            outbox_files = scan_outbox(self.agent.agent_dir)
+            outbox_files = scan_outbox(user_dir)
 
             # Финализация: edit на месте если корот��о и нет файлов
             finalized = False
@@ -2242,7 +2433,7 @@ class TelegramBridge:
                         await send_file(context.bot, chat_id, fpath, message_thread_id=thread_id)
                     except Exception as fe:
                         logger.error(f"Outbox send error: {fe}")
-                clear_outbox(self.agent.agent_dir)
+                clear_outbox(user_dir)
 
         except asyncio.CancelledError:
             await status.cleanup()
@@ -2444,7 +2635,7 @@ class TelegramBridge:
 
         try:
             file_path = await download_file(
-                context.bot, doc.file_id, self.agent.agent_dir
+                context.bot, doc.file_id, self._effective_dir(update)
             )
             self._add_to_buffer(chat_id, caption, file_path, context)
         except Exception as e:
@@ -2475,7 +2666,7 @@ class TelegramBridge:
 
         try:
             file_path = await download_file(
-                context.bot, photo.file_id, self.agent.agent_dir
+                context.bot, photo.file_id, self._effective_dir(update)
             )
             self._add_to_buffer(chat_id, caption, file_path, context)
         except Exception as e:
@@ -2517,14 +2708,15 @@ class TelegramBridge:
 
         try:
             # Скачать OGG
+            user_dir = self._effective_dir(update)
             ogg_path = await download_voice(
-                context.bot, voice.file_id, self.agent.agent_dir
+                context.bot, voice.file_id, user_dir
             )
 
             # Транскрибировать
             transcript = await transcribe(
                 ogg_path,
-                agent_dir=self.agent.agent_dir,
+                agent_dir=user_dir,
                 master_agent_dir=master_dir,
             )
 

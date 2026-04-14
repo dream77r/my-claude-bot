@@ -12,9 +12,11 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import shutil
 import sys
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -181,6 +183,8 @@ class Agent:
 
         # Инициализация памяти
         memory.ensure_dirs(self.agent_dir)
+        if self.is_multi_user:
+            self._migrate_single_to_multi()
 
         logger.info(f"Agent '{self.name}' загружен из {config_path}")
 
@@ -214,6 +218,96 @@ class Agent:
         if not self.allowed_users:
             return True  # Если список пуст — доступ всем
         return user_id in self.allowed_users
+
+    # ── Multi-user isolation ──
+
+    @property
+    def is_multi_user(self) -> bool:
+        """Multi-user mode: each user gets their own isolated memory and session."""
+        return bool(self.config.get("multi_user", False))
+
+    def get_effective_dir(self, user_id: int | None = None) -> str:
+        """Return per-user directory in multi_user mode, otherwise agent_dir."""
+        if user_id and self.is_multi_user:
+            return str(Path(self.agent_dir) / "users" / str(user_id))
+        return self.agent_dir
+
+    def is_user_registered(self, user_id: int) -> bool:
+        """Check if user is registered (has their own directory in multi_user mode)."""
+        if not self.is_multi_user:
+            return self.is_user_allowed(user_id)
+        return (Path(self.agent_dir) / "users" / str(user_id)).exists()
+
+    def generate_key(self) -> str:
+        """Generate a new single-use access key. Returns the key string."""
+        key = secrets.token_urlsafe(16)
+        keys_dir = Path(self.agent_dir) / "keys"
+        keys_dir.mkdir(exist_ok=True)
+        key_data = {
+            "used": False,
+            "user_id": None,
+            "created_at": datetime.now().isoformat(),
+        }
+        (keys_dir / f"{key}.yaml").write_text(
+            yaml.dump(key_data, allow_unicode=True), encoding="utf-8"
+        )
+        return key
+
+    def validate_key(self, key: str) -> tuple[bool, str]:
+        """
+        Validate an access key.
+        Returns (valid, reason): reason is 'ok', 'not_found', or 'used'.
+        """
+        if not re.match(r"^[A-Za-z0-9_\-]+$", key):
+            return False, "not_found"
+        key_file = Path(self.agent_dir) / "keys" / f"{key}.yaml"
+        if not key_file.exists():
+            return False, "not_found"
+        try:
+            data = yaml.safe_load(key_file.read_text(encoding="utf-8"))
+        except Exception:
+            return False, "not_found"
+        if data.get("used"):
+            return False, "used"
+        return True, "ok"
+
+    def activate_key(self, key: str, user_id: int) -> None:
+        """Mark key as used, associate with user_id, and create user directory."""
+        key_file = Path(self.agent_dir) / "keys" / f"{key}.yaml"
+        try:
+            data = yaml.safe_load(key_file.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        data["used"] = True
+        data["user_id"] = user_id
+        data["activated_at"] = datetime.now().isoformat()
+        key_file.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
+        user_dir = self.get_effective_dir(user_id)
+        memory.ensure_dirs(user_dir)
+
+    def _migrate_single_to_multi(self) -> None:
+        """
+        One-time migration: copy memory/ into users/{owner_id}/memory/
+        when multi_user mode is first enabled.
+        """
+        old_memory = Path(self.agent_dir) / "memory"
+        users_dir = Path(self.agent_dir) / "users"
+        if not old_memory.exists() or users_dir.exists():
+            return
+        owner_id = self.allowed_users[0] if self.allowed_users else None
+        if not owner_id:
+            logger.warning(
+                f"[{self.name}] multi_user=true but allowed_users is empty — "
+                "cannot migrate existing memory. Set allowed_users in agent.yaml."
+            )
+            return
+        new_memory_dir = users_dir / str(owner_id) / "memory"
+        new_memory_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(old_memory, new_memory_dir)
+        logger.info(
+            f"[{self.name}] Migrated memory/ → users/{owner_id}/memory/ "
+            "(multi_user mode enabled)"
+        )
 
     @staticmethod
     def parse_skill_frontmatter(text: str) -> tuple[dict | None, str]:
@@ -604,14 +698,16 @@ class Agent:
             "отправить/вернуть/сохранить файл"
         )
 
-    def build_system_prompt(self, user_query: str = "") -> str:
+    def build_system_prompt(self, user_query: str = "", user_dir: str | None = None) -> str:
         """
         Собрать полный system prompt:
         SOUL.md + system_prompt из YAML + skills + memory context
 
         Args:
             user_query: текущий запрос пользователя (для wiki search)
+            user_dir: per-user directory в multi_user режиме (иначе agent_dir)
         """
+        effective_dir = user_dir or self.agent_dir
         parts = []
 
         # 1. SOUL.md — личность агента
@@ -629,7 +725,7 @@ class Agent:
             parts.append("## Скиллы\n\n" + skills)
 
         # 4. Контекст из памяти (smart: profile, hot pages, wiki search, daily, index)
-        ctx = memory.build_smart_context(self.agent_dir, user_query=user_query)
+        ctx = memory.build_smart_context(effective_dir, user_query=user_query)
         if ctx:
             parts.append("## Контекст из памяти\n\n" + ctx)
 
@@ -651,11 +747,11 @@ class Agent:
                 )
 
         # 7. Инструкция по работе с файлами (outbox)
-        outbox_path = Path(self.agent_dir) / "memory" / "outbox"
+        outbox_path = Path(effective_dir) / "memory" / "outbox"
         parts.append(self._build_file_instructions(str(outbox_path.resolve())))
 
         # 8. Языковая инструкция
-        lang = memory.get_setting(self.agent_dir, "language")
+        lang = memory.get_setting(effective_dir, "language")
         if lang:
             parts.append(t("system_lang_instruction", lang))
 
@@ -726,6 +822,7 @@ class Agent:
         on_tool_use: Callable[[str], Awaitable[None]] | None = None,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
         group_chat_id: int | None = None,
+        user_id: int | None = None,
     ) -> str:
         """
         Вызвать Claude через claude-agent-sdk.
@@ -745,6 +842,9 @@ class Agent:
         """
         sem = semaphore or self._semaphore
 
+        # Per-user directory (multi_user mode) or agent-level directory
+        effective_dir = self.get_effective_dir(user_id)
+
         # Подготовить промпт с файлами
         prompt = message
         if files:
@@ -755,7 +855,7 @@ class Agent:
         if group_chat_id is not None:
             system_prompt = self.build_group_system_prompt(group_chat_id)
         else:
-            system_prompt = self.build_system_prompt(user_query=message)
+            system_prompt = self.build_system_prompt(user_query=message, user_dir=effective_dir)
 
         # Allowed tools
         allowed_tools = self._parse_allowed_tools()
@@ -771,11 +871,11 @@ class Agent:
                     t for t in _MP_TOOLS if t not in allowed_tools
                 ]
 
-        # Memory path для cwd
-        memory_path = Path(self.agent_dir) / "memory"
+        # Memory path для cwd (per-user в multi_user mode)
+        memory_path = Path(effective_dir) / "memory"
 
-        # Session ID для --resume
-        session_id = memory.get_session_id(self.agent_dir)
+        # Session ID для --resume (per-user)
+        session_id = memory.get_session_id(effective_dir)
 
         # Перехват stderr для диагностики
         stderr_lines = []
@@ -783,8 +883,8 @@ class Agent:
             stderr_lines.append(line)
             logger.warning(f"Claude stderr: {line.strip()}")
 
-        # Модель: settings override → agent.yaml default
-        active_model = memory.get_setting(self.agent_dir, "claude_model") or self.claude_model
+        # Модель: settings override → agent.yaml default (per-user)
+        active_model = memory.get_setting(effective_dir, "claude_model") or self.claude_model
 
         # CLI hooks для Claude Code
         cli_hooks = {
@@ -924,7 +1024,7 @@ class Agent:
                 has_session_error = "session" in stderr_text or "conversation" in stderr_text or "not found" in stderr_text
                 if session_id and has_session_error:
                     logger.info("Сессия потеряна, создаю новую")
-                    memory.clear_session_id(self.agent_dir)
+                    memory.clear_session_id(effective_dir)
                     options.resume = None
                     try:
                         async for msg in query(prompt=prompt_final, options=options):
@@ -937,12 +1037,12 @@ class Agent:
                 else:
                     return "Произошла ошибка. Попробуй ещё раз."
 
-            # Сохранить session_id
+            # Сохранить session_id (per-user)
             if new_session_id:
-                memory.save_session_id(self.agent_dir, new_session_id)
+                memory.save_session_id(effective_dir, new_session_id)
 
-            # Auto-commit памяти после каждого ответа
-            memory.git_commit(self.agent_dir)
+            # Auto-commit памяти после каждого ответа (per-user)
+            memory.git_commit(effective_dir)
 
             # Hook: after_call
             await self.hooks.emit("after_call", HookContext(
