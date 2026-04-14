@@ -10,10 +10,26 @@ FleetRuntime — глобальный контекст для hot-reload аге�
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+
+def _master_notify_chat_id(agent: "Agent") -> int:
+    """Telegram chat_id for master-agent background notifications.
+
+    For DM the user_id equals the chat_id, so FOUNDER_TELEGRAM_ID is the
+    right target for SmartHeartbeat/Legacy heartbeat pushes. Workers don't
+    have a founder concept, so fall back to 0 (no push).
+    """
+    if not agent.is_master:
+        return 0
+    try:
+        return int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+    except ValueError:
+        return 0
 
 from . import memory
 from .agent import Agent
@@ -237,6 +253,7 @@ class FleetRuntime:
                 # Smart heartbeat с триггерами
                 smart_hb = SmartHeartbeat(
                     agent.agent_dir, agent.name, hb_config, bus=self.bus,
+                    chat_id=_master_notify_chat_id(agent),
                 )
                 hb_task = asyncio.create_task(smart_hb.run())
             else:
@@ -564,6 +581,7 @@ async def async_main() -> None:
                 # Smart heartbeat с триггерами
                 smart_hb = SmartHeartbeat(
                     agent.agent_dir, agent.name, hb_config, bus=bus,
+                    chat_id=_master_notify_chat_id(agent),
                 )
                 hb_task = asyncio.create_task(smart_hb.run())
                 trigger_names = [t["name"] for t in hb_config["triggers"]]
