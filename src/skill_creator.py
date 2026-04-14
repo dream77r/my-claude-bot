@@ -82,6 +82,8 @@ def list_skills(agent_dir: str) -> list[dict]:
     from .agent import Agent
 
     result = []
+
+    # Single-file skills: skills/{name}.md
     for f in sorted(skills_dir.glob("*.md")):
         raw = f.read_text(encoding="utf-8")
         meta, _ = Agent.parse_skill_frontmatter(raw)
@@ -91,7 +93,22 @@ def list_skills(agent_dir: str) -> list[dict]:
             "always": meta.get("always", False) if meta else False,
             "path": str(f),
         })
-    return result
+
+    # Bundle skills: skills/{name}/SKILL.md
+    for d in sorted(skills_dir.iterdir()):
+        if d.is_dir():
+            skill_md = d / "SKILL.md"
+            if skill_md.exists():
+                raw = skill_md.read_text(encoding="utf-8")
+                meta, _ = Agent.parse_skill_frontmatter(raw)
+                result.append({
+                    "name": d.name,
+                    "description": meta.get("description", "") if meta else "",
+                    "always": meta.get("always", False) if meta else False,
+                    "path": str(skill_md),
+                })
+
+    return sorted(result, key=lambda x: x["name"])
 
 
 def _get_existing_skills_text(agent_dir: str) -> str:

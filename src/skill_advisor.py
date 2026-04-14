@@ -255,7 +255,10 @@ def _get_current_skills(agent_dir: str) -> str:
     skills = []
     for f in skills_dir.glob("*.md"):
         skills.append(f"- {f.stem}")
-    return "\n".join(skills)
+    for d in skills_dir.iterdir():
+        if d.is_dir() and (d / "SKILL.md").exists():
+            skills.append(f"- {d.name}")
+    return "\n".join(sorted(skills))
 
 
 def _read_file_safe(path: Path) -> str:
