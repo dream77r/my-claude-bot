@@ -40,11 +40,17 @@ entity со следующими именами (точное совпадени
 `SmartTrigger`, `Smart Trigger`, `smart_heartbeat`, `heartbeat`,
 `deadline_check`, `morning_briefing`, `evening_digest`, `news_monitor`,
 `knowledge_graph`, `kg_level1`, `kg_level2`, `kg_level3`,
-`dream`, `dispatcher`, `bus`, `FleetBus`, `agent.yaml`, `HEARTBEAT.md`,
+`dream_cycle`, `dream_phase`, `dispatcher`, `bus`, `FleetBus`,
+`agent.yaml`, `HEARTBEAT.md`,
 `wiki` (само слово как сущность — это файлы агента, не объект мира),
 `daily`, `summaries`, `memory`, `graph.json`, `log.md`, `profile.md`,
 `интеграция инструментов`, `интеграция-инструментов`,
 `Automated Deadline Management`, `Information Access`, `Notification System`.
+
+Исключение: если `dream` или другое похожее слово — это явный никнейм или
+имя реального человека в диалоге (например, «меня зовут dream»), то это
+валидный Person. Отличай контекст. Блок-лист выше — про имена служебных
+компонентов, не про возможные человеческие имена.
 
 То же правило для типов: НЕ извлекай как entity сам факт «триггер
 запустился», «проверка прошла», «notification отправлена», «extraction

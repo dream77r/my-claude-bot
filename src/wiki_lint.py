@@ -48,14 +48,18 @@ _INFRA_BLOCKLIST = [
     "log.md",
     "profile.md",
     "kg level",
+    "dream_cycle",
+    "dream_phase",
     "automated deadline management",
     "information access",
     "notification system",
 ]
 
-# Точные совпадения (имена, которые сами по себе являются инфраструктурой)
+# Точные совпадения (имена, которые сами по себе являются инфраструктурой).
+# ВАЖНО: сюда НЕ добавляем обычные слова, которые могут быть настоящими
+# именами сущностей пользователя (dream — это может быть никнейм человека).
 _INFRA_BLOCKLIST_EXACT = {
-    "wiki", "memory", "daily", "summaries", "dream", "bus",
+    "wiki", "memory", "daily", "summaries", "bus",
     "интеграция инструментов", "интеграция-инструментов",
 }
 
@@ -118,17 +122,31 @@ def _name_is_blocked(name: str) -> bool:
     return any(bad in n for bad in _INFRA_BLOCKLIST)
 
 
+# Папки wiki/, которые lint НЕ считает за entity-страницы. Сюда попадают:
+# - synthesis/ — это L3-синтез, а не entity;
+# - concepts/, entities/ — legacy pre-типизации (до Этапа 3), оставлены для
+#   обратной совместимости, но новыми entity считаться не должны.
+_LINT_IGNORED_SUBDIRS = {"synthesis", "concepts", "entities"}
+
+# Корневые md-файлы внутри wiki/, которые не являются entity-страницами.
+_LINT_IGNORED_ROOT_FILES = {"index.md"}
+
+
 def _collect_entity_pages(memory_path: Path) -> list[Path]:
     wiki = memory_path / "wiki"
     if not wiki.exists():
         return []
     pages: list[Path] = []
     for md in wiki.rglob("*.md"):
-        # Не считаем сам lint-отчёт и synthesis-страницы за entity
+        # Скрытые файлы (lint-отчёт и т.п.)
         if md.name.startswith("."):
             continue
         rel = md.relative_to(memory_path)
-        if len(rel.parts) >= 3 and rel.parts[1] == "synthesis":
+        # wiki/index.md и другие корневые служебные страницы
+        if len(rel.parts) == 2 and rel.parts[1] in _LINT_IGNORED_ROOT_FILES:
+            continue
+        # wiki/<subdir>/... — пропускаем legacy и synthesis
+        if len(rel.parts) >= 3 and rel.parts[1] in _LINT_IGNORED_SUBDIRS:
             continue
         pages.append(md)
     return pages
