@@ -124,7 +124,7 @@ def log_message(
     daily_path = ensure_daily_note(agent_dir, date)
     timestamp = date.strftime("%H:%M")
     prefix = "👤" if role == "user" else "🤖"
-    entry = f"\n**{timestamp}** {prefix} {content[:500]}\n"
+    entry = f"\n**{timestamp}** {prefix} {content}\n"
     if files:
         for f in files:
             entry += f"  📎 {os.path.basename(f)}\n"
