@@ -1067,37 +1067,30 @@ async def nightly_graph_cycle(
 
 
 # ── Одноразовый backfill после обновления ──
+#
+# 2-фазный: линковка (L1+L2 по истории) и синтез (L3 по накопленным саммари).
+# Каждая фаза — со своим маркером, независимо идемпотентна.
+#
+# Маркеры должны обновляться при изменении схемы KG. Текущая версия = v1
+# (фильтр + 9 типов + supersession + lint + synthesis).
 
-# Маркер должен обновляться при изменении схемы KG (фильтр, типизация,
-# supersession). Текущая версия = v1 (фильтр + 9 типов + supersession + lint).
-BACKFILL_MARKER = "sessions/.kg_backfill_v1_done"
+BACKFILL_MARKER = "sessions/.kg_backfill_v1_done"  # линковка (L1+L2)
+BACKFILL_SYNTHESIS_MARKER = "sessions/.kg_backfill_synthesis_v1_done"  # L3
 BACKFILL_DEFAULT_DAYS = 14
 
 
-async def maybe_backfill(
+async def _backfill_linking_phase(
     agent_dir: str,
-    config: dict | None = None,
-    days: int = BACKFILL_DEFAULT_DAYS,
+    config: dict,
+    days: int,
 ) -> dict:
-    """
-    Одноразовый проход KG L1+L2 по последним `days` дневным логам.
-
-    Идемпотентно через файл-маркер `sessions/.kg_backfill_v1_done`.
-    Это нужно, чтобы после апдейта у пользователей старые daily-логи
-    прошли через новый фильтр и типизацию — иначе граф заполнится только
-    с завтрашнего ночного цикла.
-
-    Returns:
-        dict с полями `skipped`, `reason`, `processed`, `errors`.
-    """
+    """Фаза 1: прогнать L1+L2 по последним `days` дневным логам."""
     memory_path = memory.get_memory_path(agent_dir)
     marker = memory_path / BACKFILL_MARKER
 
     if marker.exists():
         return {"skipped": True, "reason": "already_done"}
 
-    if config is None:
-        config = {}
     model = config.get("model", "haiku")
 
     daily_dir = memory_path / "daily"
@@ -1106,8 +1099,6 @@ async def maybe_backfill(
         marker.write_text(datetime.now().isoformat(), encoding="utf-8")
         return {"skipped": True, "reason": "no_daily_dir"}
 
-    # Собрать даты за последние N дней (вчера включительно, сегодня сделает
-    # ночной цикл или текущая прогонка).
     today = datetime.now().date()
     dates_to_process: list[datetime] = []
     for i in range(1, days + 1):
@@ -1128,7 +1119,7 @@ async def maybe_backfill(
         }
 
     logger.info(
-        f"KG backfill v1: запускаю для {len(dates_to_process)} "
+        f"KG backfill v1 (linking): запускаю для {len(dates_to_process)} "
         f"исторических дней ({agent_dir})"
     )
 
@@ -1145,24 +1136,6 @@ async def maybe_backfill(
             )
             errors += 1
 
-    # Запустить lint после накопления данных
-    try:
-        from .wiki_lint import run_lint
-        run_lint(agent_dir)
-    except Exception as e:
-        logger.warning(f"KG backfill: lint после backfill упал: {e}")
-
-    # Git-коммит накопленных изменений
-    try:
-        memory.git_commit(
-            agent_dir,
-            f"KG backfill v1: {processed} дней, {errors} ошибок",
-        )
-    except Exception as e:
-        logger.warning(f"KG backfill: git_commit упал: {e}")
-
-    # Поставить маркер — независимо от числа ошибок, чтобы не крутить цикл
-    # повторно. Если часть дней упала, их можно будет разобрать вручную.
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(
         json.dumps(
@@ -1178,13 +1151,147 @@ async def maybe_backfill(
     )
 
     logger.info(
-        f"KG backfill v1: завершён — {processed} дней обработано, "
+        f"KG backfill v1 (linking): завершён — {processed} дней, "
         f"{errors} ошибок"
     )
     return {
         "skipped": False,
         "processed": processed,
         "errors": errors,
+    }
+
+
+async def _backfill_synthesis_phase(
+    agent_dir: str,
+    config: dict,
+) -> dict:
+    """
+    Фаза 2: прогнать L3 (synthesize_graph) один раз по накопленным саммари.
+
+    Отдельный маркер, так что у пользователей, которые уже прошли v1
+    линковку, при следующем старте запустится только синтез — без
+    повторного L1/L2 и траты токенов.
+    """
+    memory_path = memory.get_memory_path(agent_dir)
+    marker = memory_path / BACKFILL_SYNTHESIS_MARKER
+
+    if marker.exists():
+        return {"skipped": True, "reason": "already_done"}
+
+    model = config.get("model", "haiku")
+    max_summaries = config.get("max_summaries", 30)
+
+    # Предварительная проверка: есть ли вообще саммари для синтеза?
+    summaries_dir = memory_path / SUMMARIES_DIR
+    if not summaries_dir.exists() or len(list(summaries_dir.glob("*.md"))) < 2:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "completed_at": datetime.now().isoformat(),
+                    "skipped_reason": "insufficient_summaries",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "skipped": True,
+            "reason": "insufficient_summaries",
+        }
+
+    logger.info(
+        f"KG backfill v1 (synthesis): запускаю L3 для {agent_dir}"
+    )
+
+    ok = False
+    error_msg = ""
+    try:
+        result = await synthesize_graph(
+            agent_dir, model=model, max_summaries=max_summaries
+        )
+        ok = bool(result.get("ok"))
+    except Exception as e:
+        logger.error(f"KG backfill synthesis: ошибка L3: {e}")
+        error_msg = str(e)
+
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "completed_at": datetime.now().isoformat(),
+                "ok": ok,
+                "error": error_msg,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    logger.info(
+        f"KG backfill v1 (synthesis): завершён (ok={ok})"
+    )
+    return {"skipped": False, "ok": ok, "error": error_msg}
+
+
+async def maybe_backfill(
+    agent_dir: str,
+    config: dict | None = None,
+    days: int = BACKFILL_DEFAULT_DAYS,
+) -> dict:
+    """
+    Двухфазный одноразовый backfill после апдейта KG-схемы.
+
+    Фаза 1 (linking): L1+L2 по последним `days` дням.
+    Фаза 2 (synthesis): L3 по накопленным саммари.
+
+    Каждая фаза — с отдельным маркером. Идемпотентны независимо, поэтому
+    пользователи, которые ранее прошли только линковку, при следующем
+    апдейте получат только синтез, без траты токенов на L1/L2.
+
+    Returns:
+        dict вида
+        {
+            "linking": {...},
+            "synthesis": {...},
+            "skipped": bool,  # True только если обе фазы skipped
+        }
+    """
+    if config is None:
+        config = {}
+
+    linking_result = await _backfill_linking_phase(agent_dir, config, days)
+    synthesis_result = await _backfill_synthesis_phase(agent_dir, config)
+
+    # Lint и git-commit общие — после обеих фаз
+    did_work = not (linking_result.get("skipped") and synthesis_result.get("skipped"))
+
+    if did_work:
+        try:
+            from .wiki_lint import run_lint
+            run_lint(agent_dir)
+        except Exception as e:
+            logger.warning(f"KG backfill: lint упал: {e}")
+
+        try:
+            memory.git_commit(
+                agent_dir,
+                (
+                    f"KG backfill v1: "
+                    f"linking={linking_result.get('processed', 0)}, "
+                    f"synthesis={'ok' if synthesis_result.get('ok') else 'skip'}"
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"KG backfill: git_commit упал: {e}")
+
+    return {
+        "linking": linking_result,
+        "synthesis": synthesis_result,
+        "skipped": (
+            linking_result.get("skipped", False)
+            and synthesis_result.get("skipped", False)
+        ),
     }
 
 
