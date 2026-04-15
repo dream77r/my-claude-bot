@@ -26,6 +26,7 @@ memory_path: "./agents/me/memory/"
 skills:
   - "document-analysis"
   - "web-research"
+  - "wiki-search"
 allowed_users:
   - ${FOUNDER_TELEGRAM_ID}
 max_context_messages: 50

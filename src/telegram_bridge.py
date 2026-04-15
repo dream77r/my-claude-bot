@@ -69,6 +69,7 @@ BOT_COMMANDS = [
     BotCommand("memory", "История изменений памяти"),
     BotCommand("restore", "Откатить память"),
     BotCommand("dream", "Запустить Dream-обработку памяти"),
+    BotCommand("recall", "Поиск по памяти и графу: /recall <тема>"),
     BotCommand("model", "Сменить модель Claude"),
     BotCommand("stats", "Статистика использования"),
     BotCommand("agents", "Список всех агентов"),
@@ -523,6 +524,7 @@ class TelegramBridge:
         router.exact("/restore", self._cmd_memory_restore)
         router.exact("/status", self._cmd_status)
         router.exact("/dream", self._cmd_dream)
+        router.exact("/recall", self._cmd_recall)
         router.exact("/model", self._cmd_model)
         router.exact("/stats", self._cmd_stats)
 
@@ -1163,6 +1165,37 @@ class TelegramBridge:
                 update, context,
                 f"Ошибка Dream-цикла: {e}"
             )
+
+    async def _cmd_recall(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """
+        /recall <тема> — поиск по локальной wiki/ и графу.
+
+        Просто проксирует запрос мастер-агенту с явной инструкцией
+        использовать навык wiki-search. Сам поиск (BM25 + BFS + цитаты)
+        выполняется детерминированным CLI src.wiki_search изнутри навыка.
+        """
+        query = (args or "").strip()
+        if not query:
+            await self._reply(
+                update, context,
+                "Использование: /recall <тема>\n\n"
+                "Например: /recall Phase 5",
+            )
+            return
+
+        chat_id = update.effective_chat.id
+        prompt = (
+            f"Используй навык wiki-search для поиска по памяти. "
+            f"Тема: {query}\n\n"
+            f"Запусти CLI `python3 -m src.wiki_search --agent agents/me "
+            f"--query \"{query}\"` из корня проекта, затем сформулируй "
+            f"человеческий ответ по данным навыка. Если в памяти ничего "
+            f"не найдено — честно скажи об этом, не выдумывай."
+        )
+        user_id = update.effective_user.id if update.effective_user else None
+        self._add_to_buffer(chat_id, prompt, None, context, user_id=user_id)
 
     async def _cmd_model(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str

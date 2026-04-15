@@ -25,6 +25,21 @@
 - Если день был пустой или без значимых событий — скажи об этом коротко
 - Приоритизируй: решения > обсуждения > информация
 
+### ⛔ Игнорируй собственную инфраструктуру агента
+
+Секции вида `### [HH:MM] SmartTrigger: <имя>` — это служебные логи фоновых триггеров
+(deadline_check, morning_briefing, evening_digest, news_monitor и т.п.), а не разговор
+с пользователем. НЕ включай их в темы и решения.
+
+Никогда не выдавай как тему/решение/сущность следующие имена (это компоненты тебя самого):
+`SmartTrigger`, `deadline_check`, `morning_briefing`, `evening_digest`, `news_monitor`,
+`knowledge_graph`, `heartbeat`, `dream`, `dispatcher`, `bus`, `wiki` (как объект),
+`memory`, `daily`, `graph.json`, `интеграция инструментов`,
+`Automated Deadline Management`, `Information Access`, `Notification System`.
+
+Если после фильтрации в дне не осталось содержательного — верни короткое саммари
+«Содержательных событий не было» и пустые массивы.
+
 ## Формат ответа — СТРОГО JSON:
 
 ```json

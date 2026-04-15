@@ -41,6 +41,199 @@ SUMMARIES_DIR = "daily/summaries"
 # Файл для трекинга состояния синтеза
 SYNTHESIS_STATE_FILE = "sessions/.synthesis_state.json"
 
+# 9 типов entity (Этап 3 KG_WIKI_PLAN.md). Каждый тип кладётся в свою папку
+# wiki/<folder>/. Имя типа в JSON — каноническое (CamelCase), но мы аккуратно
+# принимаем и lowercase.
+_ENTITY_TYPE_TO_FOLDER: dict[str, str] = {
+    "Person": "people",
+    "Company": "companies",
+    "Project": "projects",
+    "Decision": "decisions",
+    "Idea": "ideas",
+    "Event": "events",
+    "Topic": "topics",
+    "Claim": "claims",
+    "Document": "documents",
+}
+
+
+def _normalize_entity_type(raw: str | None) -> str:
+    """Привести тип к каноническому виду. Неизвестное → 'Topic'."""
+    if not raw:
+        return "Topic"
+    raw_l = raw.strip().lower()
+    for canonical in _ENTITY_TYPE_TO_FOLDER:
+        if canonical.lower() == raw_l:
+            return canonical
+    # Обратная совместимость со старой 6-типовой схемой
+    legacy_map = {
+        "person": "Person",
+        "people": "Person",
+        "company": "Company",
+        "organization": "Company",
+        "project": "Project",
+        "product": "Project",
+        "concept": "Idea",
+        "tool": "Document",
+        "event": "Event",
+        "decision": "Decision",
+        "idea": "Idea",
+        "topic": "Topic",
+        "claim": "Claim",
+        "document": "Document",
+    }
+    return legacy_map.get(raw_l, "Topic")
+
+
+def _entity_folder(entity_type: str) -> str:
+    return _ENTITY_TYPE_TO_FOLDER.get(_normalize_entity_type(entity_type), "topics")
+
+
+# Supersession (Этап 4 KG_WIKI_PLAN.md). Для типов связей из этого набора
+# работает правило "single-value": одна сущность может иметь только одну
+# *активную* связь такого типа. Когда LLM извлекает новую — старая
+# помечается superseded_by, но не удаляется (граф = история, не state).
+_EXCLUSIVE_LINK_TYPES = frozenset({
+    "works_at",   # один основной работодатель
+    "owns",       # один владелец
+    "lives_in",   # одно место жительства
+    "leads",      # один лидер проекта
+})
+
+
+def _edge_id(edge: dict) -> str:
+    """Стабильный id ребра — для ссылок supersedes / superseded_by."""
+    parts = [
+        edge.get("from", ""),
+        edge.get("to", ""),
+        edge.get("type", ""),
+        edge.get("first_seen", "") or edge.get("date", ""),
+    ]
+    return "|".join(parts)
+
+
+def _apply_supersession(graph: dict, new_edge: dict) -> None:
+    """
+    Применить supersession-логику для нового ребра.
+
+    1. Если тип ребра — exclusive, и в графе уже есть активное (не superseded)
+       ребро с тем же `from` и `type`, но другим `to` — старое помечается
+       superseded_by нового.
+    2. Если LLM явно прислал `supersedes: <name>` — пометить указанные.
+    """
+    new_id = _edge_id(new_edge)
+    new_type = new_edge.get("type", "")
+    new_from = new_edge.get("from", "")
+    new_to = new_edge.get("to", "")
+
+    edges = graph.get("edges", [])
+
+    # 1. Автоматический supersession для exclusive типов
+    if new_type in _EXCLUSIVE_LINK_TYPES:
+        for old in edges:
+            if old.get("superseded_by"):
+                continue
+            if (
+                old.get("type") == new_type
+                and old.get("from") == new_from
+                and old.get("to") != new_to
+            ):
+                old["superseded_by"] = new_id
+                old["superseded_at"] = new_edge.get("date") or new_edge.get(
+                    "last_seen", ""
+                )
+
+    # 2. Явный supersedes от LLM (имя сущности, которую новое утверждение отменяет)
+    explicit = new_edge.get("supersedes")
+    if explicit:
+        targets = explicit if isinstance(explicit, list) else [explicit]
+        target_set = {t.lower() for t in targets if isinstance(t, str)}
+        for old in edges:
+            if old.get("superseded_by"):
+                continue
+            if (
+                old.get("from", "").lower() in target_set
+                or old.get("to", "").lower() in target_set
+            ):
+                old["superseded_by"] = new_id
+                old["superseded_at"] = new_edge.get("date", "")
+
+
+def _safe_filename(name: str) -> str:
+    """Превратить имя entity в безопасное имя файла."""
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", name).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:120] or "unnamed"
+
+
+def _ensure_entity_page(
+    memory_path: Path,
+    name: str,
+    entity_type: str,
+    date_str: str,
+    confidence: float = 1.0,
+) -> Path:
+    """
+    Создать (или обновить last_seen в) stub-страницу entity.
+
+    Структура:
+        wiki/<folder>/<Name>.md
+
+    Frontmatter содержит type, created, last_seen, confidence. Если
+    страница уже есть — обновляем только last_seen и добавляем строку в
+    раздел "Упоминания".
+    """
+    canonical_type = _normalize_entity_type(entity_type)
+    folder = _entity_folder(canonical_type)
+    safe_name = _safe_filename(name)
+    page_dir = memory_path / "wiki" / folder
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_path = page_dir / f"{safe_name}.md"
+
+    if not page_path.exists():
+        content = (
+            f"---\n"
+            f"type: {canonical_type}\n"
+            f"created: {date_str}\n"
+            f"last_seen: {date_str}\n"
+            f"confidence: {confidence}\n"
+            f"---\n\n"
+            f"# {name}\n\n"
+            f"## Упоминания\n\n"
+            f"- {date_str}\n"
+        )
+        page_path.write_text(content, encoding="utf-8")
+        return page_path
+
+    # Обновить last_seen и добавить дату в Упоминания (если ещё нет)
+    try:
+        existing = page_path.read_text(encoding="utf-8")
+    except OSError:
+        return page_path
+
+    updated = re.sub(
+        r"(?m)^last_seen:\s*\S+",
+        f"last_seen: {date_str}",
+        existing,
+        count=1,
+    )
+    if f"- {date_str}" not in updated:
+        if "## Упоминания" in updated:
+            updated = updated.replace(
+                "## Упоминания\n",
+                f"## Упоминания\n\n- {date_str}\n",
+                1,
+            ).replace(
+                f"## Упоминания\n\n- {date_str}\n\n- ",
+                f"## Упоминания\n\n- {date_str}\n- ",
+            )
+        else:
+            updated = updated.rstrip() + f"\n\n## Упоминания\n\n- {date_str}\n"
+
+    if updated != existing:
+        page_path.write_text(updated, encoding="utf-8")
+    return page_path
+
 
 # ── Утилиты ──
 
@@ -204,6 +397,118 @@ def _load_template(agent_dir: str, template_name: str) -> str:
     return ""
 
 
+# ── Source-фильтрация дневного лога ──
+#
+# KG-экстрактор должен видеть только пользовательский диалог, а не работу
+# самой инфраструктуры агента. Иначе LLM извлекает имена внутренних компонентов
+# (SmartTrigger, deadline_check, wiki) как entity и строит вокруг них фальшивые
+# кластеры. См. KG_WIKI_PLAN.md, этап 1.
+
+_BLOCK_USER_RE = re.compile(r"^\*\*\d{1,2}:\d{2}\*\*\s+👤")
+_BLOCK_AGENT_RE = re.compile(r"^\*\*\d{1,2}:\d{2}\*\*\s+🤖")
+_BLOCK_TRIGGER_RE = re.compile(r"^###\s*\[\d{1,2}:\d{2}\]\s*SmartTrigger:")
+_BLOCK_DAY_HEADER_RE = re.compile(r"^#\s+\d{4}-\d{2}-\d{2}")
+_AGENT_LINE_CONTENT_RE = re.compile(r"^\*\*\d{1,2}:\d{2}\*\*\s+🤖\s*(.*)$")
+
+
+def _extract_user_content(daily_text: str) -> str:
+    """
+    Оставить в дневном логе только настоящий пользовательский диалог.
+
+    Удаляются:
+    - блоки SmartTrigger (`### [HH:MM] SmartTrigger: ...` до следующего блока);
+    - автогенерированные секции `## Связи дня` и вложенные `### Упомянутые сущности`;
+    - фоновые ответы агента (🤖) без предшествующего пользовательского сообщения;
+    - пустые "обёртки" 🤖, которые на самом деле являются заголовками SmartTrigger.
+
+    Сохраняются:
+    - заголовок дня `# YYYY-MM-DD ...`;
+    - пользовательские сообщения (👤);
+    - прямые ответы агента (🤖), идущие сразу после 👤.
+    """
+    if not daily_text:
+        return ""
+
+    # 1. Вырезать `## Связи дня ...` целиком (до следующего `## ` или EOF).
+    cleaned = re.sub(
+        r"\n## Связи дня[^\n]*\n.*?(?=\n## |\Z)",
+        "",
+        daily_text,
+        flags=re.DOTALL,
+    )
+
+    lines = cleaned.split("\n")
+
+    # 2. Разбить на блоки. Каждый блок — это однотипная секция (user / agent /
+    #    trigger / header), границы — по строкам, начинающим новый блок.
+    BLOCK_HEADER = "header"
+    BLOCK_USER = "user"
+    BLOCK_AGENT = "agent"
+    BLOCK_TRIGGER = "trigger"
+
+    blocks: list[tuple[str, list[str]]] = []
+    current_type: str | None = None
+    current_lines: list[str] = []
+
+    def _flush() -> None:
+        if current_type is not None:
+            blocks.append((current_type, list(current_lines)))
+
+    for line in lines:
+        if _BLOCK_DAY_HEADER_RE.match(line):
+            _flush()
+            current_type = BLOCK_HEADER
+            current_lines = [line]
+        elif _BLOCK_USER_RE.match(line):
+            _flush()
+            current_type = BLOCK_USER
+            current_lines = [line]
+        elif _BLOCK_AGENT_RE.match(line):
+            _flush()
+            current_type = BLOCK_AGENT
+            current_lines = [line]
+        elif _BLOCK_TRIGGER_RE.match(line):
+            _flush()
+            current_type = BLOCK_TRIGGER
+            current_lines = [line]
+        else:
+            if current_type is None:
+                current_type = BLOCK_HEADER
+                current_lines = [line]
+            else:
+                current_lines.append(line)
+    _flush()
+
+    # 3. Отфильтровать блоки.
+    result_chunks: list[str] = []
+    user_pending = False  # был ли user-блок без ответа
+
+    for btype, blines in blocks:
+        if btype == BLOCK_HEADER:
+            result_chunks.append("\n".join(blines))
+            continue
+        if btype == BLOCK_USER:
+            result_chunks.append("\n".join(blines))
+            user_pending = True
+            continue
+        if btype == BLOCK_AGENT:
+            content_match = _AGENT_LINE_CONTENT_RE.match(blines[0])
+            first_line_payload = content_match.group(1).strip() if content_match else ""
+            rest_payload = "\n".join(blines[1:]).strip()
+            has_content = bool(first_line_payload or rest_payload)
+            if has_content and user_pending:
+                result_chunks.append("\n".join(blines))
+                user_pending = False
+            # Иначе блок отбрасывается. user_pending не сбрасываем, если агент
+            # был пустой — пользователь технически всё ещё ждёт ответа.
+            continue
+        if btype == BLOCK_TRIGGER:
+            # Шум — отбрасываем, состояние не трогаем.
+            continue
+
+    return "\n".join(result_chunks).strip()
+
+
 def _extract_json(text: str) -> dict | None:
     """Извлечь JSON из текста (может быть в ```json блоке)."""
     match = re.search(r"```json\s*\n(.*?)\n\s*```", text, re.DOTALL)
@@ -260,6 +565,14 @@ async def link_daily_entities(
         logger.info(f"KG Level 1: daily note {date_str} слишком короткий")
         return result
 
+    # Фильтр: только настоящий пользовательский диалог, без SmartTrigger-шума
+    daily_content = _extract_user_content(daily_content)
+    if len(daily_content.strip()) < 50:
+        logger.info(
+            f"KG Level 1: дневной user-контент {date_str} пуст после фильтрации"
+        )
+        return result
+
     # Прочитать существующие wiki-страницы для контекста
     wiki_dir = memory_path / "wiki"
     existing_pages = []
@@ -299,6 +612,21 @@ async def link_daily_entities(
     result["entities"] = entities
     result["links_found"] = len(links)
 
+    # Создать/обновить stub-страницы для каждого entity (Этап 3)
+    for entity in entities:
+        ent_name = entity.get("name", "").strip()
+        if not ent_name:
+            continue
+        # Принимаем оба ключа — новый "type" и старый "category"
+        ent_type = entity.get("type") or entity.get("category") or "Topic"
+        confidence = float(entity.get("confidence", 1.0) or 1.0)
+        try:
+            _ensure_entity_page(
+                memory_path, ent_name, ent_type, date_str, confidence
+            )
+        except OSError as e:
+            logger.warning(f"KG L1: не удалось создать страницу {ent_name}: {e}")
+
     # Добавить секцию "Связи дня" в daily note
     if links:
         links_section = f"\n\n## Связи дня ({date_str})\n\n"
@@ -329,7 +657,11 @@ async def link_daily_entities(
                 "type": link.get("type", "related"),
                 "context": link.get("context", ""),
                 "date": date_str,
+                "confidence": float(link.get("confidence", 1.0) or 1.0),
             }
+            if link.get("supersedes"):
+                edge["supersedes"] = link["supersedes"]
+
             # Проверить дубликат (та же пара + тот же день)
             is_dup = any(
                 e.get("from") == edge["from"]
@@ -338,25 +670,30 @@ async def link_daily_entities(
                 for e in graph["edges"]
             )
             if not is_dup:
-                # Обновить strength для существующих рёбер
+                # Обновить strength для существующих активных рёбер той же пары
                 updated = False
                 for existing in graph["edges"]:
+                    if existing.get("superseded_by"):
+                        continue
                     if (
                         existing.get("from") == edge["from"]
                         and existing.get("to") == edge["to"]
-                    ) or (
-                        existing.get("from") == edge["to"]
-                        and existing.get("to") == edge["from"]
+                        and existing.get("type") == edge["type"]
                     ):
                         existing["strength"] = existing.get("strength", 1) + 1
                         existing["last_seen"] = date_str
                         existing["context"] = edge["context"]
+                        existing["confidence"] = max(
+                            existing.get("confidence", 1.0), edge["confidence"]
+                        )
                         updated = True
                         break
                 if not updated:
                     edge["first_seen"] = date_str
                     edge["last_seen"] = date_str
                     edge["strength"] = 1
+                    edge["id"] = _edge_id(edge)
+                    _apply_supersession(graph, edge)
                     graph["edges"].append(edge)
 
         _save_graph(agent_dir, graph)
@@ -401,6 +738,13 @@ async def summarize_day(
     daily_content = daily_path.read_text(encoding="utf-8")
     if len(daily_content.strip()) < 50:
         logger.info(f"KG Level 2: daily note {date_str} слишком короткий")
+        return result
+
+    daily_content = _extract_user_content(daily_content)
+    if len(daily_content.strip()) < 50:
+        logger.info(
+            f"KG Level 2: дневной user-контент {date_str} пуст после фильтрации"
+        )
         return result
 
     # Загрузить шаблон
@@ -697,16 +1041,151 @@ async def nightly_graph_cycle(
             f"всего: {state.get('total_runs', 0)} запусков)"
         )
 
+    # ── Lint: проверки целостности после KG-цикла (Этап 5) ──
+    try:
+        from .wiki_lint import run_lint
+        lint_report = run_lint(agent_dir)
+        result["lint"] = {
+            "total": lint_report.total,
+            "errors": lint_report.errors,
+        }
+    except Exception as e:
+        logger.error(f"wiki_lint failed: {e}")
+        result["lint"] = {"ok": False, "error": str(e)}
+
     # Git commit всех изменений
     memory.git_commit(
         agent_dir,
         f"Knowledge Graph: L1={result['level1'].get('links_found', 0)} links, "
         f"L2={'ok' if result['level2'].get('ok') else 'skip'}, "
-        f"L3={'ok' if result['level3'].get('ok') else 'skip'}",
+        f"L3={'ok' if result['level3'].get('ok') else 'skip'}, "
+        f"lint={result.get('lint', {}).get('total', '?')}",
     )
 
     logger.info(f"Knowledge Graph: ночной цикл завершён")
     return result
+
+
+# ── Одноразовый backfill после обновления ──
+
+# Маркер должен обновляться при изменении схемы KG (фильтр, типизация,
+# supersession). Текущая версия = v1 (фильтр + 9 типов + supersession + lint).
+BACKFILL_MARKER = "sessions/.kg_backfill_v1_done"
+BACKFILL_DEFAULT_DAYS = 14
+
+
+async def maybe_backfill(
+    agent_dir: str,
+    config: dict | None = None,
+    days: int = BACKFILL_DEFAULT_DAYS,
+) -> dict:
+    """
+    Одноразовый проход KG L1+L2 по последним `days` дневным логам.
+
+    Идемпотентно через файл-маркер `sessions/.kg_backfill_v1_done`.
+    Это нужно, чтобы после апдейта у пользователей старые daily-логи
+    прошли через новый фильтр и типизацию — иначе граф заполнится только
+    с завтрашнего ночного цикла.
+
+    Returns:
+        dict с полями `skipped`, `reason`, `processed`, `errors`.
+    """
+    memory_path = memory.get_memory_path(agent_dir)
+    marker = memory_path / BACKFILL_MARKER
+
+    if marker.exists():
+        return {"skipped": True, "reason": "already_done"}
+
+    if config is None:
+        config = {}
+    model = config.get("model", "haiku")
+
+    daily_dir = memory_path / "daily"
+    if not daily_dir.exists():
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(datetime.now().isoformat(), encoding="utf-8")
+        return {"skipped": True, "reason": "no_daily_dir"}
+
+    # Собрать даты за последние N дней (вчера включительно, сегодня сделает
+    # ночной цикл или текущая прогонка).
+    today = datetime.now().date()
+    dates_to_process: list[datetime] = []
+    for i in range(1, days + 1):
+        d = today - timedelta(days=i)
+        daily_file = daily_dir / f"{d.isoformat()}.md"
+        if daily_file.exists():
+            dates_to_process.append(
+                datetime.combine(d, datetime.min.time())
+            )
+
+    if not dates_to_process:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(datetime.now().isoformat(), encoding="utf-8")
+        return {
+            "skipped": True,
+            "reason": "no_historical_dailies",
+            "processed": 0,
+        }
+
+    logger.info(
+        f"KG backfill v1: запускаю для {len(dates_to_process)} "
+        f"исторических дней ({agent_dir})"
+    )
+
+    processed = 0
+    errors = 0
+    for date in dates_to_process:
+        try:
+            await link_daily_entities(agent_dir, model=model, date=date)
+            await summarize_day(agent_dir, model=model, date=date)
+            processed += 1
+        except Exception as e:
+            logger.error(
+                f"KG backfill: ошибка для {date.strftime('%Y-%m-%d')}: {e}"
+            )
+            errors += 1
+
+    # Запустить lint после накопления данных
+    try:
+        from .wiki_lint import run_lint
+        run_lint(agent_dir)
+    except Exception as e:
+        logger.warning(f"KG backfill: lint после backfill упал: {e}")
+
+    # Git-коммит накопленных изменений
+    try:
+        memory.git_commit(
+            agent_dir,
+            f"KG backfill v1: {processed} дней, {errors} ошибок",
+        )
+    except Exception as e:
+        logger.warning(f"KG backfill: git_commit упал: {e}")
+
+    # Поставить маркер — независимо от числа ошибок, чтобы не крутить цикл
+    # повторно. Если часть дней упала, их можно будет разобрать вручную.
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "completed_at": datetime.now().isoformat(),
+                "processed": processed,
+                "errors": errors,
+                "days_window": days,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    logger.info(
+        f"KG backfill v1: завершён — {processed} дней обработано, "
+        f"{errors} ошибок"
+    )
+    return {
+        "skipped": False,
+        "processed": processed,
+        "errors": errors,
+    }
 
 
 async def nightly_graph_loop(
@@ -728,6 +1207,17 @@ async def nightly_graph_loop(
         f"KG nightly loop запущен для {agent_dir}, "
         f"расписание: {run_hour:02d}:{run_minute:02d} UTC"
     )
+
+    # Одноразовый backfill после апдейта схемы KG. Срабатывает один раз
+    # (идемпотентен через sessions/.kg_backfill_v1_done), затем больше не
+    # беспокоит. Для других пользователей после update.sh — их исторические
+    # daily-логи пройдут через новый фильтр и типизацию без ручных команд.
+    try:
+        backfill_result = await maybe_backfill(agent_dir, config)
+        if not backfill_result.get("skipped"):
+            logger.info(f"KG backfill применён: {backfill_result}")
+    except Exception as e:
+        logger.error(f"KG backfill упал на старте: {e}")
 
     while True:
         try:

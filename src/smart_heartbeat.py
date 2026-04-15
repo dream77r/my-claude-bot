@@ -272,8 +272,32 @@ class SmartHeartbeat:
             f"в чат {self.chat_id}"
         )
 
+    # Sentinel-ответы триггеров, которые не несут содержания и не должны
+    # попадать в daily-лог (иначе knowledge graph extractor превращает их
+    # в фальшивые сущности типа "SmartTrigger" / "deadline_check").
+    _NOISE_RESPONSES = {"NO_DEADLINES", "NONE", "NOTHING", "EMPTY", "OK"}
+
+    @classmethod
+    def _is_noise_response(cls, response: str) -> bool:
+        stripped = (response or "").strip()
+        if not stripped:
+            return True
+        if len(stripped) < 20 and stripped.upper() in cls._NOISE_RESPONSES:
+            return True
+        return False
+
     def _log_to_daily(self, trigger_name: str, response: str) -> None:
-        """Записать результат триггера в daily note."""
+        """Записать результат триггера в daily note.
+
+        Пропускает sentinel-ответы (NO_DEADLINES и т.п.) — это служебный шум,
+        который раньше попадал в KG-экстрактор и плодил ложные сущности.
+        """
+        if self._is_noise_response(response):
+            logger.debug(
+                f"SmartTrigger '{trigger_name}': пустой/служебный ответ, "
+                f"в daily не пишем"
+            )
+            return
         try:
             now = datetime.now()
             time_str = now.strftime("%H:%M")

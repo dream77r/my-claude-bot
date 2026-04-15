@@ -65,6 +65,13 @@ class Agent:
         self.system_prompt_template: str = self.config.get("system_prompt", "")
         self.memory_path: str = self.config.get("memory_path", f"./agents/{self.name}/memory/")
         self.skill_names: list[str] = self.config.get("skills", [])
+        # Runtime-миграция: автоподключение встроенных навыков (wiki-search и
+        # т.п.), если их файлы есть в skills/. Не трогает agent.yaml — для
+        # пользователей с локальными правками конфига это безопасно.
+        from .agent_migrations import auto_register_builtin_skills
+        self.skill_names = auto_register_builtin_skills(
+            self.agent_dir, self.config.get("name", "?"), self.skill_names
+        )
         self.allowed_users: list[int] = self._parse_allowed_users()
         self.max_context_messages: int = self.config.get("max_context_messages", 50)
         self.claude_model: str = self.config.get("claude_model", "sonnet")
