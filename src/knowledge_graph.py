@@ -166,50 +166,32 @@ def _safe_filename(name: str) -> str:
     return cleaned[:120] or "unnamed"
 
 
-def _ensure_entity_page(
-    memory_path: Path,
-    name: str,
-    entity_type: str,
-    date_str: str,
-    confidence: float = 1.0,
-) -> Path:
-    """
-    Создать (или обновить last_seen в) stub-страницу entity.
+# Legacy-папки до типизации — туда ещё может быть положена entity из прошлых
+# версий KG. Cross-folder lookup должен их тоже учитывать, чтобы не плодить
+# дубликаты.
+_ENTITY_LOOKUP_FOLDERS: tuple[str, ...] = tuple(_ENTITY_TYPE_TO_FOLDER.values()) + (
+    "entities", "concepts",
+)
 
-    Структура:
-        wiki/<folder>/<Name>.md
 
-    Frontmatter содержит type, created, last_seen, confidence. Если
-    страница уже есть — обновляем только last_seen и добавляем строку в
-    раздел "Упоминания".
-    """
-    canonical_type = _normalize_entity_type(entity_type)
-    folder = _entity_folder(canonical_type)
-    safe_name = _safe_filename(name)
-    page_dir = memory_path / "wiki" / folder
-    page_dir.mkdir(parents=True, exist_ok=True)
-    page_path = page_dir / f"{safe_name}.md"
+def _find_existing_entity_page(memory_path: Path, safe_name: str) -> Path | None:
+    """Найти страницу с данным stem в любой типизированной или legacy-папке."""
+    wiki = memory_path / "wiki"
+    if not wiki.exists():
+        return None
+    for folder in _ENTITY_LOOKUP_FOLDERS:
+        candidate = wiki / folder / f"{safe_name}.md"
+        if candidate.exists():
+            return candidate
+    return None
 
-    if not page_path.exists():
-        content = (
-            f"---\n"
-            f"type: {canonical_type}\n"
-            f"created: {date_str}\n"
-            f"last_seen: {date_str}\n"
-            f"confidence: {confidence}\n"
-            f"---\n\n"
-            f"# {name}\n\n"
-            f"## Упоминания\n\n"
-            f"- {date_str}\n"
-        )
-        page_path.write_text(content, encoding="utf-8")
-        return page_path
 
-    # Обновить last_seen и добавить дату в Упоминания (если ещё нет)
+def _touch_entity_page(page_path: Path, date_str: str) -> None:
+    """Обновить last_seen и добавить дату в Упоминания у существующей страницы."""
     try:
         existing = page_path.read_text(encoding="utf-8")
     except OSError:
-        return page_path
+        return
 
     updated = re.sub(
         r"(?m)^last_seen:\s*\S+",
@@ -232,6 +214,52 @@ def _ensure_entity_page(
 
     if updated != existing:
         page_path.write_text(updated, encoding="utf-8")
+
+
+def _ensure_entity_page(
+    memory_path: Path,
+    name: str,
+    entity_type: str,
+    date_str: str,
+    confidence: float = 1.0,
+) -> Path:
+    """
+    Создать (или обновить last_seen в) stub-страницу entity.
+
+    Cross-folder lookup: если страница с таким именем уже лежит в любой
+    wiki-папке (people/, projects/, legacy entities/ и т.п.), она
+    обновляется in-place вне зависимости от переданного `entity_type`. Это
+    защищает от дубликатов, когда L3 дописывает рёбра к entity, типизацию
+    которой раньше сделал L1 в другой папке.
+
+    Если страницы нет нигде — создаём новую в папке, соответствующей
+    `entity_type` (по умолчанию topics/ для Topic).
+    """
+    canonical_type = _normalize_entity_type(entity_type)
+    safe_name = _safe_filename(name)
+
+    existing_page = _find_existing_entity_page(memory_path, safe_name)
+    if existing_page is not None:
+        _touch_entity_page(existing_page, date_str)
+        return existing_page
+
+    folder = _entity_folder(canonical_type)
+    page_dir = memory_path / "wiki" / folder
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_path = page_dir / f"{safe_name}.md"
+
+    content = (
+        f"---\n"
+        f"type: {canonical_type}\n"
+        f"created: {date_str}\n"
+        f"last_seen: {date_str}\n"
+        f"confidence: {confidence}\n"
+        f"---\n\n"
+        f"# {name}\n\n"
+        f"## Упоминания\n\n"
+        f"- {date_str}\n"
+    )
+    page_path.write_text(content, encoding="utf-8")
     return page_path
 
 
@@ -927,25 +955,44 @@ async def synthesize_graph(
         result["cross_links"] = len(cross_links)
 
         # Добавить cross-day связи в граф
+        today_str = datetime.now().strftime("%Y-%m-%d")
         for link in cross_links:
             edge = {
                 "from": link.get("from", ""),
                 "to": link.get("to", ""),
                 "type": link.get("type", "cross_day"),
                 "context": link.get("context", ""),
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "first_seen": link.get("first_seen", ""),
-                "last_seen": datetime.now().strftime("%Y-%m-%d"),
+                "date": today_str,
+                "first_seen": link.get("first_seen", "") or today_str,
+                "last_seen": today_str,
                 "strength": link.get("strength", 1),
+                "confidence": float(link.get("confidence", 0.8) or 0.8),
             }
-            # Проверить дубликат
+            # Проверить дубликат (симметрично + по типу)
             is_dup = any(
                 (e.get("from") == edge["from"] and e.get("to") == edge["to"])
                 or (e.get("from") == edge["to"] and e.get("to") == edge["from"])
                 for e in graph["edges"]
-                if e.get("type") == "cross_day"
+                if e.get("type") == edge["type"]
             )
             if not is_dup:
+                edge["id"] = _edge_id(edge)
+                # Создать/обновить stub-страницы для обоих endpoint'ов,
+                # чтобы lint не ругался на dangling edges. Тип по умолчанию
+                # Topic: L3 не знает точного типа; если страница уже есть
+                # в другой папке, cross-folder lookup в _ensure_entity_page
+                # просто обновит её in-place.
+                for endpoint in (edge["from"], edge["to"]):
+                    if not endpoint:
+                        continue
+                    try:
+                        _ensure_entity_page(
+                            memory_path, endpoint, "Topic", today_str,
+                        )
+                    except OSError as e:
+                        logger.warning(
+                            f"KG L3: не удалось создать stub для '{endpoint}': {e}"
+                        )
                 graph["edges"].append(edge)
 
         _save_graph(agent_dir, graph)

@@ -114,6 +114,52 @@ def test_ensure_entity_page_handles_all_nine_types(tmp_path):
         assert f"type: {t}" in page.read_text(encoding="utf-8")
 
 
+def test_ensure_entity_page_cross_folder_no_duplicate(tmp_path):
+    """
+    Если entity уже есть в projects/, повторный вызов с type=Topic должен
+    обновить её in-place, а не создать дубликат в topics/.
+    """
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    original = _ensure_entity_page(mem, "Phase5", "Project", "2026-04-10")
+    assert original.parent.name == "projects"
+
+    again = _ensure_entity_page(mem, "Phase5", "Topic", "2026-04-15")
+    assert again == original  # тот же файл
+    # Дубликата в topics/ не создано
+    assert not (mem / "wiki" / "topics" / "Phase5.md").exists()
+    # last_seen обновился
+    text = again.read_text(encoding="utf-8")
+    assert "last_seen: 2026-04-15" in text
+    # Оригинальный тип сохранён
+    assert "type: Project" in text
+
+
+def test_ensure_entity_page_cross_folder_finds_legacy(tmp_path):
+    """Entity в legacy-папке wiki/entities/ тоже обнаруживается."""
+    mem = tmp_path / "memory"
+    (mem / "wiki" / "entities").mkdir(parents=True)
+    legacy_page = mem / "wiki" / "entities" / "OldThing.md"
+    legacy_page.write_text(
+        "---\ntype: Topic\nlast_seen: 2026-04-01\n---\n\n# OldThing\n",
+        encoding="utf-8",
+    )
+    result = _ensure_entity_page(mem, "OldThing", "Topic", "2026-04-15")
+    assert result == legacy_page
+    assert "last_seen: 2026-04-15" in result.read_text(encoding="utf-8")
+    # Новой страницы в topics/ не создано
+    assert not (mem / "wiki" / "topics" / "OldThing.md").exists()
+
+
+def test_ensure_entity_page_creates_new_when_nothing_exists(tmp_path):
+    """Если страницы нет нигде — создаётся в папке согласно типу."""
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    page = _ensure_entity_page(mem, "NewThing", "Topic", "2026-04-15")
+    assert page.parent.name == "topics"
+    assert page.exists()
+
+
 def test_wiki_search_picks_up_frontmatter_type(tmp_path):
     """wiki_search должен брать тип из frontmatter, а не только из папки."""
     from src.wiki_search import search
