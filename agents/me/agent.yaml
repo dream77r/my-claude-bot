@@ -27,6 +27,7 @@ skills:
   - "document-analysis"
   - "web-research"
   - "wiki-search"
+  - "bugreport"
 allowed_users:
   - ${FOUNDER_TELEGRAM_ID}
 max_context_messages: 50
