@@ -157,6 +157,34 @@ if [ "$ALREADY_CURRENT" -eq 0 ]; then
 fi
 
 # ══════════════════════════════════════════
+# Миграция .env — добавить новые ключи
+# ══════════════════════════════════════════
+
+echo ""
+echo -e "${BOLD}Checking .env migrations...${RESET}"
+
+ENV_UPDATED=0
+
+_add_env_key() {
+    local KEY="$1"
+    local VALUE="$2"
+    local COMMENT="$3"
+    if [ -f .env ] && ! grep -q "^${KEY}=" .env; then
+        echo "" >> .env
+        echo "# ${COMMENT}" >> .env
+        echo "${KEY}=${VALUE}" >> .env
+        echo -e "${GREEN}  ✓ Added ${KEY}${RESET}"
+        ENV_UPDATED=1
+    fi
+}
+
+_add_env_key "BUG_REPORT_CHAT_ID" "-1003998514795" "Канал для баг-репортов (@mcb-bugs)"
+
+if [ "$ENV_UPDATED" -eq 0 ]; then
+    echo -e "${GREEN}  ✓ .env up to date${RESET}"
+fi
+
+# ══════════════════════════════════════════
 # Восстановление stash
 # ══════════════════════════════════════════
 
