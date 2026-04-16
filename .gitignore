@@ -38,3 +38,5 @@ Thumbs.db
 
 # Кэш пула скиллов (клонируется из внешнего репо my-claude-bot-skills)
 .cache/
+claude-inbox/
+src/graphify-out/
