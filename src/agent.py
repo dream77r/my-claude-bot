@@ -29,6 +29,7 @@ from claude_agent_sdk import (
     query,
 )
 
+from . import git_committer
 from . import memory
 from . import get_claude_cli_path
 from .audit import make_audit_hook
@@ -1048,8 +1049,10 @@ class Agent:
             if new_session_id:
                 memory.save_session_id(effective_dir, new_session_id)
 
-            # Auto-commit памяти после каждого ответа (per-user)
-            memory.git_commit(effective_dir)
+            # Auto-commit памяти после каждого ответа (per-user).
+            # Debounced: несколько подряд идущих ответов сливаются в один коммит,
+            # сам git работает в thread pool — event loop не блокируется.
+            await git_committer.commit(effective_dir)
 
             # Hook: after_call
             await self.hooks.emit("after_call", HookContext(

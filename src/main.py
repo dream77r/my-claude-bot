@@ -688,6 +688,13 @@ async def async_main() -> None:
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         orchestrator.stop()
+    finally:
+        # Flush любые отложенные git-коммиты до выхода
+        from . import git_committer
+        try:
+            await git_committer.flush()
+        except Exception as e:
+            logger.warning(f"git_committer.flush на shutdown: {e}")
 
 
 def main() -> None:
