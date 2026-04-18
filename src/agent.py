@@ -76,6 +76,11 @@ class Agent:
         self.allowed_users: list[int] = self._parse_allowed_users()
         self.max_context_messages: int = self.config.get("max_context_messages", 50)
         self.claude_model: str = self.config.get("claude_model", "sonnet")
+        # Роутер (опт-ин): если claude_model_router задан, перед основным
+        # вызовом Haiku-классификатор решает SIMPLE vs COMPLEX. SIMPLE →
+        # переключаем модель на claude_model_simple, COMPLEX → claude_model.
+        self.claude_model_router: str | None = self.config.get("claude_model_router")
+        self.claude_model_simple: str = self.config.get("claude_model_simple", "haiku")
         self.claude_flags: list[str] = self.config.get("claude_flags", [])
         self.mcp_servers: dict = self.config.get("mcp_servers", {})
 
@@ -893,6 +898,22 @@ class Agent:
 
         # Модель: settings override → agent.yaml default (per-user)
         active_model = memory.get_setting(effective_dir, "claude_model") or self.claude_model
+
+        # Router (опт-ин): Haiku-классификатор решает, можно ли
+        # обойтись дешёвой моделью. При ошибке/таймауте классификатор
+        # сам возвращает COMPLEX, т.е. поведение не меняется.
+        if self.claude_model_router and message and message.strip():
+            from . import model_router
+            verdict = await model_router.classify(
+                message, router_model=self.claude_model_router
+            )
+            if verdict == "SIMPLE":
+                active_model = self.claude_model_simple
+                logger.info(
+                    f"Agent '{self.name}': router SIMPLE → model={active_model}"
+                )
+            else:
+                logger.debug(f"Agent '{self.name}': router COMPLEX → model={active_model}")
 
         # CLI hooks для Claude Code.
         # PreCompact делает git-снапшот memory перед сжатием, чтобы правки

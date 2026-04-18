@@ -32,6 +32,11 @@ allowed_users:
   - ${FOUNDER_TELEGRAM_ID}
 max_context_messages: 50
 claude_model: "sonnet"
+# Router: Haiku-классификатор перед основным вызовом. SIMPLE запросы
+# (приветствия, короткие вопросы из памяти, подтверждения) идут на
+# claude_model_simple; всё остальное — на claude_model.
+claude_model_router: "haiku"
+claude_model_simple: "haiku"
 claude_flags:
   - "--allowedTools"
   - "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Agent"
