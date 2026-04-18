@@ -125,7 +125,8 @@ class TestCheckBubblewrapRequirements:
             _check_bubblewrap_requirements([Stub()])
         assert "coder" in caplog.text
 
-    def test_bwrap_missing_exits(self, monkeypatch):
+    def test_bwrap_missing_degrades_gracefully(self, monkeypatch, caplog):
+        """Без bwrap сервис продолжает работать, а не падает."""
         from src.main import _check_bubblewrap_requirements
 
         monkeypatch.setattr("shutil.which", lambda _: None)
@@ -134,6 +135,16 @@ class TestCheckBubblewrapRequirements:
             config = {"sandbox": {"bubblewrap": True}}
             name = "coder"
 
-        with pytest.raises(SystemExit) as exc:
-            _check_bubblewrap_requirements([Stub()])
-        assert exc.value.code == 1
+        stub = Stub()
+        with caplog.at_level("WARNING"):
+            _check_bubblewrap_requirements([stub])  # не должно бросить SystemExit
+        # Агент помечен как unavailable — bwrap выключен до рестарта
+        assert stub._bwrap_unavailable is True
+        assert "bubblewrap" in caplog.text.lower()
+        assert "coder" in caplog.text
+
+    def test_degraded_agent_builds_no_sandbox_settings(self, worker_agent):
+        """Помеченный _bwrap_unavailable агент возвращает None даже если config требует."""
+        worker_agent._bwrap_unavailable = True
+        settings = worker_agent._build_bash_sandbox_settings({"bubblewrap": True})
+        assert settings is None

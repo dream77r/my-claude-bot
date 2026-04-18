@@ -58,6 +58,16 @@ skill_advisor:
   analysis_days: 7             # период анализа (дней)
   master_name: "me"            # имя master-агента для отчётов
 
+# Sandbox: coder — доверенный dev-агент, работает с проектами в
+# /home/claude-agents/projects/*, с git, с кодом вообще везде. Sandbox
+# отключён обоими слоями. Защита — через command_guard (блокирует
+# rm -rf /, shutdown и т.п. деструктив).
+sandbox:
+  enabled: false
+  bubblewrap: false
+command_guard:
+  enabled: true
+
 heartbeat:
   enabled: true
   interval_minutes: 60

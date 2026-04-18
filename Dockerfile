@@ -1,7 +1,10 @@
 FROM python:3.12-slim
 
 # git нужен для git-backed memory
-RUN apt-get update && apt-get install -y --no-install-recommends git && \
+# bubblewrap — опциональный bash sandbox для worker-агентов
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        bubblewrap && \
     rm -rf /var/lib/apt/lists/*
 
 # Создаём пользователя (UID/GID можно переопределить при сборке)

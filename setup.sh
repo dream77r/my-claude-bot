@@ -119,6 +119,27 @@ if ! command -v git &>/dev/null; then
 fi
 echo -e "${GREEN}  ✓ git${RESET}"
 
+# bubblewrap (optional but рекомендуется — bash sandbox для worker-агентов)
+if command -v bwrap &>/dev/null; then
+    echo -e "${GREEN}  ✓ bubblewrap (bash sandbox available)${RESET}"
+elif command -v apt-get &>/dev/null; then
+    echo -e "${YELLOW}  ○ bubblewrap not found${RESET}"
+    echo "    Recommended for sandboxing worker agents (coder, team, archivist, custom)."
+    read -rp "  Install bubblewrap now? [Y/n] " INSTALL_BWRAP
+    if [[ ! "$INSTALL_BWRAP" =~ ^[nN] ]]; then
+        if sudo apt-get install -y bubblewrap 2>&1 | tail -3; then
+            echo -e "${GREEN}  ✓ bubblewrap installed${RESET}"
+        else
+            echo -e "${YELLOW}  ⚠ install failed — continuing without bash sandbox${RESET}"
+            echo "    Agents will fall back to hook-only sandbox."
+        fi
+    else
+        echo -e "${YELLOW}  ○ skipped — workers will use hook-only sandbox${RESET}"
+    fi
+else
+    echo -e "${YELLOW}  ○ bubblewrap not found (apt-get unavailable, skip)${RESET}"
+fi
+
 # Node.js (optional, for qmd semantic search)
 if command -v node &>/dev/null; then
     NODE_VERSION=$(node --version)

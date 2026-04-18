@@ -200,6 +200,39 @@ if [ "$STASHED" -eq 1 ]; then
 fi
 
 # ══════════════════════════════════════════
+# Bubblewrap — проверка если хоть один агент его требует
+# ══════════════════════════════════════════
+
+# Простой grep по agents/*/agent.yaml на строку 'bubblewrap: true'.
+# Не парсим YAML ради одного флага.
+WANTS_BWRAP=$(grep -rEl '^\s*bubblewrap:\s*true' agents/*/agent.yaml 2>/dev/null || true)
+
+if [ -n "$WANTS_BWRAP" ]; then
+    echo ""
+    echo -e "${BOLD}Checking bubblewrap (bash sandbox)...${RESET}"
+    if command -v bwrap &>/dev/null; then
+        echo -e "${GREEN}  ✓ bwrap installed${RESET}"
+    elif command -v apt-get &>/dev/null; then
+        echo -e "${YELLOW}  ⚠ Agents требуют bubblewrap, но bwrap не установлен${RESET}"
+        AGENT_LIST=$(echo "$WANTS_BWRAP" | xargs -I{} dirname {} | xargs -I{} basename {} | tr '\n' ' ')
+        echo -e "${DIM}    Агенты: ${AGENT_LIST}${RESET}"
+        read -rp "  Install bubblewrap now (recommended)? [Y/n] " INSTALL_BWRAP
+        if [[ ! "$INSTALL_BWRAP" =~ ^[nN] ]]; then
+            if sudo apt-get install -y bubblewrap 2>&1 | tail -3; then
+                echo -e "${GREEN}  ✓ bubblewrap installed${RESET}"
+            else
+                echo -e "${YELLOW}  ⚠ Install failed — bot будет работать с hook-only sandbox${RESET}"
+            fi
+        else
+            echo -e "${YELLOW}  ○ Skipped — bot будет работать с hook-only sandbox${RESET}"
+            echo -e "${DIM}    Чтобы поставить позже:  sudo apt-get install -y bubblewrap${RESET}"
+        fi
+    else
+        echo -e "${YELLOW}  ⚠ bwrap не установлен, apt-get недоступен — hook-only sandbox${RESET}"
+    fi
+fi
+
+# ══════════════════════════════════════════
 # Перезапуск сервиса
 # ══════════════════════════════════════════
 

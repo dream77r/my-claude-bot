@@ -461,10 +461,15 @@ def _acquire_singleton_lock(agents: list[Agent]) -> None:
 
 
 def _check_bubblewrap_requirements(agents: list[Agent]) -> None:
-    """Проверить, что bwrap установлен если хоть один агент его требует.
+    """Проверить, что bwrap установлен если агенты его требуют.
 
-    Лучше упасть на старте с понятной ошибкой, чем получить cryptic
-    субпроцесс-фейл из Claude CLI при первой же Bash-команде агента.
+    Если bwrap отсутствует — НЕ падаем, а деградируем до hook-only sandbox:
+    у агента выставляется флаг, и _build_bash_sandbox_settings вернёт None.
+    Сервис продолжает работать без bash sandbox (hook sandbox остаётся).
+
+    Это сознательный trade-off: лучше degrade gracefully, чем оставить
+    пользователя с мёртвым сервисом после git pull && update.sh, когда
+    bwrap ещё не успели поставить.
     """
     import shutil
 
@@ -481,13 +486,16 @@ def _check_bubblewrap_requirements(agents: list[Agent]) -> None:
         return
 
     names = ", ".join(a.name for a in agents_wanting_bwrap)
-    logger.error(
-        "Агенты %s требуют bubblewrap sandbox, но `bwrap` не установлен.\n"
-        "  Установить:  sudo apt-get install -y bubblewrap\n"
-        "  Или выключи `sandbox.bubblewrap` в их agent.yaml.",
+    logger.warning(
+        "⚠ bubblewrap не установлен, но запрошен агентами: %s. "
+        "Продолжаем без bash sandbox (hook-only защита остаётся). "
+        "Поставь: sudo apt-get install -y bubblewrap — и перезапусти сервис.",
         names,
     )
-    sys.exit(1)
+    # Пометить агентов, чтобы _build_bash_sandbox_settings выключил bwrap
+    # на этот запуск. Флаг пересоздаётся на каждом старте по конфигу.
+    for a in agents_wanting_bwrap:
+        a._bwrap_unavailable = True
 
 
 async def async_main() -> None:

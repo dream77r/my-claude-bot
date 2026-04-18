@@ -66,6 +66,14 @@ skill_advisor:
   analysis_days: 7
   master_name: "me"
 
+# Sandbox: Team работает только внутри своей папки — трекинг задач,
+# командная wiki, без выхода наружу. Full sandbox: hook блокирует
+# Read/Write вне agents/team/, bwrap изолирует bash на уровне ядра.
+# Если bwrap не установлен — gracefully degrades до hook-only.
+sandbox:
+  enabled: true
+  bubblewrap: true
+
 heartbeat:
   enabled: false
 

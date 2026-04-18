@@ -51,6 +51,16 @@ dream:
 
 heartbeat:
   enabled: false
+
+# Sandbox: изоляция файловой системы и bash для worker-агентов.
+# enabled=true — блокирует Read/Write/Edit за пределами agents/{name}/.
+# bubblewrap=true — изолирует bash на уровне ядра (требует `sudo apt-get
+# install bubblewrap`). Новые агенты получают full sandbox по умолчанию —
+# это правильный default для custom/community-агентов, которым не нужен
+# доступ ко всей системе.
+sandbox:
+  enabled: true
+  bubblewrap: true
 """
 
 # Шаблон SOUL.md

@@ -125,6 +125,17 @@ skill_advisor:
   analysis_days: 7
   master_name: "me"
 
+# Sandbox: Архивариус работает только со своим vault'ом в agents/archivist/.
+# Документы туда скачиваются через file_handler. Full sandbox —
+# hook блокирует Read/Write вне своей папки, bwrap изолирует bash.
+# git нужен архивариусу для version control vault'а, поэтому в
+# excluded_commands. Если bwrap не установлен — graceful degrade.
+sandbox:
+  enabled: true
+  bubblewrap: true
+  bubblewrap_excluded_commands:
+    - git
+
 heartbeat:
   enabled: false
 

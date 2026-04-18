@@ -668,6 +668,10 @@ class Agent:
         """
         if not sandbox_config.get("bubblewrap", False):
             return None
+        # Флаг от main._check_bubblewrap_requirements — если bwrap не
+        # установлен, мы деградируем до no-sandbox вместо падения.
+        if getattr(self, "_bwrap_unavailable", False):
+            return None
         if self.is_master and not sandbox_config.get("allow_master_bwrap", False):
             # Защита от выстрела в ногу — master запускает wide-открытые
             # скрипты (memory backup, systemd control), bwrap его сломает.
