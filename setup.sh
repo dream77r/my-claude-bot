@@ -19,52 +19,57 @@ CYAN='\033[36m'
 RESET='\033[0m'
 
 # ──────────────────────────────────────────────
-# Sub-command: --enable-dashboard
-# One-shot helper that installs the sudoers rule
-# needed for /setup_dashboard in Telegram.
-# Run once; after that the bot can self-provision.
+# Install sudoers rule for /setup_dashboard.
+# Idempotent: safe to call multiple times.
 # ──────────────────────────────────────────────
-if [[ "${1:-}" == "--enable-dashboard" ]]; then
-    PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    HELPER="${PROJECT_DIR}/scripts/setup-dashboard.sh"
-    SUDOERS="/etc/sudoers.d/my-claude-bot"
+install_dashboard_sudoers() {
+    local script_dir helper sudoers tmp
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    helper="${script_dir}/scripts/setup-dashboard.sh"
+    sudoers="/etc/sudoers.d/my-claude-bot"
 
-    if [ ! -x "$HELPER" ]; then
-        echo -e "${RED}  ✗ Helper not found or not executable: ${HELPER}${RESET}"
+    if [ ! -x "$helper" ]; then
+        echo -e "${RED}  ✗ Helper not found or not executable: ${helper}${RESET}"
         echo "    Make sure you're in the my-claude-bot repo and the script has +x."
-        exit 1
+        return 1
     fi
 
     echo -e "${BOLD}Installing sudoers rule for /setup_dashboard…${RESET}"
-    echo "  Target: ${SUDOERS}"
-    echo "  Allows: ${USER} → NOPASSWD: ${HELPER}"
-    echo ""
+    echo "  Target: ${sudoers}"
+    echo "  Allows: ${USER} → NOPASSWD: ${helper}"
 
-    TMP="$(mktemp)"
-    cat > "$TMP" <<EOF
-# ${SUDOERS}
-# Installed by ./setup.sh --enable-dashboard
-# Lets the bot provision nginx + Let's Encrypt via /setup_dashboard.
-# The helper itself validates domain/port/email before touching anything.
+    tmp="$(mktemp)"
+    cat > "$tmp" <<EOF
+# ${sudoers}
+# Installed by ./setup.sh (lets the bot provision nginx + Let's Encrypt
+# via /setup_dashboard). The helper itself validates domain/port/email
+# before touching anything.
 
-${USER} ALL=(root) NOPASSWD: ${HELPER}
+${USER} ALL=(root) NOPASSWD: ${helper}
 EOF
 
-    if ! sudo visudo -cf "$TMP" >/dev/null; then
+    if ! sudo visudo -cf "$tmp" >/dev/null; then
         echo -e "${RED}  ✗ visudo validation failed, aborting.${RESET}"
-        rm -f "$TMP"
-        exit 1
+        rm -f "$tmp"
+        return 1
     fi
 
-    sudo install -m 0440 -o root -g root "$TMP" "$SUDOERS"
-    rm -f "$TMP"
-
+    sudo install -m 0440 -o root -g root "$tmp" "$sudoers"
+    rm -f "$tmp"
     echo -e "${GREEN}  ✓ Sudoers rule installed.${RESET}"
-    echo ""
-    echo -e "  Now open Telegram and run:"
-    echo -e "    ${CYAN}/setup_dashboard <domain> [email]${RESET}"
-    echo ""
-    exit 0
+    return 0
+}
+
+# Sub-command: --enable-dashboard (callable without full setup).
+if [[ "${1:-}" == "--enable-dashboard" ]]; then
+    if install_dashboard_sudoers; then
+        echo ""
+        echo -e "  Now open Telegram and run:"
+        echo -e "    ${CYAN}/setup_dashboard <domain> [email]${RESET}"
+        echo ""
+        exit 0
+    fi
+    exit 1
 fi
 
 echo ""
@@ -306,6 +311,41 @@ else
 fi
 
 # ══════════════════════════════════════════
+# Optional: enable /setup_dashboard from Telegram
+# ══════════════════════════════════════════
+#
+# With this enabled, you can provision the web dashboard (nginx + Let's
+# Encrypt + Mini App menu button) entirely from Telegram:
+#     /setup_dashboard <your-domain>
+# — no more terminal. Requires nginx + certbot installed and a domain
+# whose A-record already points at this server.
+
+SKIP_DASHBOARD_PROMPT="${SKIP_DASHBOARD_PROMPT:-}"
+if [ -z "$SKIP_DASHBOARD_PROMPT" ] && [ -f /etc/sudoers.d/my-claude-bot ]; then
+    SKIP_DASHBOARD_PROMPT=1  # already installed — skip silently
+fi
+
+if [ -z "$SKIP_DASHBOARD_PROMPT" ]; then
+    echo ""
+    echo -e "${BOLD}Enable /setup_dashboard from Telegram?${RESET}"
+    echo -e "  ${CYAN}Lets you configure the web dashboard (domain + HTTPS + Mini App${RESET}"
+    echo -e "  ${CYAN}menu button) by sending /setup_dashboard <domain> in Telegram.${RESET}"
+    echo -e "  ${CYAN}You can do this later with: ./setup.sh --enable-dashboard${RESET}"
+    echo ""
+    read -rp "  Enable now? [Y/n]: " ENABLE_DASH
+    ENABLE_DASH=${ENABLE_DASH:-Y}
+    if [[ "$ENABLE_DASH" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        echo ""
+        if ! install_dashboard_sudoers; then
+            echo -e "${YELLOW}  ⚠ Could not install sudoers rule. Skip — you can retry later${RESET}"
+            echo -e "${YELLOW}    with: ./setup.sh --enable-dashboard${RESET}"
+        fi
+    else
+        echo -e "  ${CYAN}Skipped. Run ./setup.sh --enable-dashboard anytime.${RESET}"
+    fi
+fi
+
+# ══════════════════════════════════════════
 # Done
 # ══════════════════════════════════════════
 
@@ -329,4 +369,8 @@ echo "  Stop:     systemctl --user stop my-claude-bot"
 echo "  Update:   cd ~/my-claude-bot && git pull && ./update.sh"
 echo ""
 echo "  Or use /restart directly in Telegram!"
+echo ""
+echo -e "  ${BOLD}Dashboard / Mini App:${RESET}"
+echo "  Point a domain's A-record at this server, then send:"
+echo -e "    ${CYAN}/setup_dashboard <your-domain>${RESET}  (in the master bot)"
 echo ""
