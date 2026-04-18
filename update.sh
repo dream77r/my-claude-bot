@@ -145,6 +145,26 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD)
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse "origin/${BRANCH}" 2>/dev/null || echo "")
 
+# ══════════════════════════════════════════
+# Одноразовая миграция agent.yaml → agent.local.yaml
+# ══════════════════════════════════════════
+# Юзеры до overlay-схемы правили agents/*/agent.yaml руками (allowed_users,
+# модель, prompt) — теперь такие правки блокируют git pull. Скрипт ниже
+# разово переносит их в untracked agent.local.yaml и откатывает tracked
+# файл к upstream. Маркер в корне репо (gitignored) — чтобы не гонять
+# второй раз. Бежит только если маркера нет И origin/<branch> доступен.
+if [ ! -f .migrated_config_overlay ] && [ -n "$REMOTE" ] && \
+   [ -x scripts/migrate_agent_configs.sh ]; then
+    echo ""
+    echo -e "${BOLD}Migrating agent configs → overlay...${RESET}"
+    if scripts/migrate_agent_configs.sh "$BRANCH"; then
+        touch .migrated_config_overlay
+        echo -e "${GREEN}  ✓ config overlay migration done${RESET}"
+    else
+        echo -e "${YELLOW}  ⚠ migration reported errors; попробую снова при следующем ./update.sh${RESET}"
+    fi
+fi
+
 if [ -z "$REMOTE" ]; then
     echo -e "${RED}  ✗ Cannot reach remote 'origin/${BRANCH}'${RESET}"
     echo "  Check your internet connection or remote URL:"

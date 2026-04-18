@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 # Шаблон agent.yaml для нового агента
 AGENT_YAML_TEMPLATE = """\
+# Этот файл обновляется через `git pull`. Чтобы кастомизировать агента
+# без конфликтов, создай рядом agent.local.yaml — его поля deep-merge'атся
+# поверх этих. Обычные кандидаты на overlay: allowed_users, claude_model,
+# system_prompt.
 name: "{name}"
 display_name: "{display_name}"
 bot_token: "${{{env_var}}}"

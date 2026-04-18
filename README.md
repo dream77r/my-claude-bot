@@ -336,6 +336,31 @@ skills/, templates/, memory/ (gitignored, seeded from memory_template/ on startu
 | `/installskill` | Install a skill from the pool (hot-reload) |
 | `/restart` | Restart the platform (applies code updates) |
 
+## Customizing an Agent Without Losing Updates (`agent.local.yaml`)
+
+`agents/<name>/agent.yaml` ships with the bot and is overwritten on every
+`git pull`. To customize an agent (own `allowed_users`, a different model,
+your own `system_prompt`) without merge conflicts, create an **untracked**
+overlay next to it:
+
+```yaml
+# agents/me/agent.local.yaml  (gitignored)
+claude_model: opus
+allowed_users:
+  - 44117786
+system_prompt: |
+  Overridden prompt just for my install.
+```
+
+Fields in `agent.local.yaml` are deep-merged over `agent.yaml` when the
+agent loads: `dict`s merge recursively, lists/scalars replace. That lets
+you *narrow* `allowed_users` to a subset, not just extend it.
+
+If you already edited `agent.yaml` by hand before this shipped, `./update.sh`
+runs a one-shot migration on first execution: it extracts your diffs into
+`agent.local.yaml` and rolls `agent.yaml` back to upstream. No action needed
+on your side.
+
 ## Agent Config (agent.yaml)
 
 ```yaml
