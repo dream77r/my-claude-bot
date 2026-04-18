@@ -651,6 +651,49 @@ class Agent:
 
         return "\n".join(parts)
 
+    def _build_bash_sandbox_settings(self, sandbox_config: dict) -> dict | None:
+        """
+        Собрать SandboxSettings для Claude CLI (bubblewrap на Linux,
+        sandbox-exec на macOS).
+
+        Включается только если явно прописано в agent.yaml:
+            sandbox:
+              bubblewrap: true
+              bubblewrap_excluded_commands:  # опционально
+                - git
+              bubblewrap_network_proxy: 8118  # опционально, HTTP proxy
+
+        Master по умолчанию без sandbox. Воркеры включают по opt-in —
+        чтобы не ломать setup где bwrap ещё не установлен.
+        """
+        if not sandbox_config.get("bubblewrap", False):
+            return None
+        if self.is_master and not sandbox_config.get("allow_master_bwrap", False):
+            # Защита от выстрела в ногу — master запускает wide-открытые
+            # скрипты (memory backup, systemd control), bwrap его сломает.
+            logger.warning(
+                f"Agent '{self.name}': bubblewrap запрошен для master, "
+                "но proигнорирован (укажи allow_master_bwrap: true если "
+                "действительно нужно)"
+            )
+            return None
+
+        settings: dict = {
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+        }
+        excluded = sandbox_config.get("bubblewrap_excluded_commands")
+        if excluded:
+            settings["excludedCommands"] = list(excluded)
+        proxy_port = sandbox_config.get("bubblewrap_network_proxy")
+        if proxy_port:
+            settings["network"] = {"httpProxyPort": int(proxy_port)}
+        # Под Docker (если bot работает в контейнере без privileged) нужен
+        # weaker sandbox — иначе bwrap откажется запускаться.
+        if sandbox_config.get("bubblewrap_nested", False):
+            settings["enableWeakerNestedSandbox"] = True
+        return settings
+
     def _build_worker_isolation(self) -> str:
         """
         Инструкции изоляции для worker-агентов.
@@ -981,6 +1024,14 @@ class Agent:
         if pre_tool_hooks:
             cli_hooks["PreToolUse"] = pre_tool_hooks
 
+        # Bash sandbox через Claude CLI (bubblewrap на Linux, sandbox-exec
+        # на macOS). Изолирует Bash-вызовы на уровне ядра — наш хук
+        # sandbox.py остаётся как defense-in-depth для Read/Write/Edit/etc.
+        # Для master'а выключен по умолчанию (ему нужен полный доступ),
+        # для воркеров — тоже выключен по умолчанию до явного opt-in,
+        # чтобы не сломать setup где bwrap не установлен.
+        bash_sandbox_settings = self._build_bash_sandbox_settings(sandbox_config)
+
         # Собрать опции
         options = ClaudeAgentOptions(
             system_prompt=system_prompt,
@@ -990,6 +1041,7 @@ class Agent:
             cli_path=get_claude_cli_path(),
             stderr=_on_stderr,
             hooks=cli_hooks,
+            sandbox=bash_sandbox_settings,
         )
 
         if allowed_tools:

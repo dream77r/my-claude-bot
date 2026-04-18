@@ -460,6 +460,36 @@ def _acquire_singleton_lock(agents: list[Agent]) -> None:
     _singleton_lock_handle = fh
 
 
+def _check_bubblewrap_requirements(agents: list[Agent]) -> None:
+    """Проверить, что bwrap установлен если хоть один агент его требует.
+
+    Лучше упасть на старте с понятной ошибкой, чем получить cryptic
+    субпроцесс-фейл из Claude CLI при первой же Bash-команде агента.
+    """
+    import shutil
+
+    agents_wanting_bwrap = [
+        a for a in agents
+        if a.config.get("sandbox", {}).get("bubblewrap", False)
+    ]
+    if not agents_wanting_bwrap:
+        return
+
+    if shutil.which("bwrap"):
+        names = ", ".join(a.name for a in agents_wanting_bwrap)
+        logger.info(f"Bash sandbox (bwrap) включён для: {names}")
+        return
+
+    names = ", ".join(a.name for a in agents_wanting_bwrap)
+    logger.error(
+        "Агенты %s требуют bubblewrap sandbox, но `bwrap` не установлен.\n"
+        "  Установить:  sudo apt-get install -y bubblewrap\n"
+        "  Или выключи `sandbox.bubblewrap` в их agent.yaml.",
+        names,
+    )
+    sys.exit(1)
+
+
 async def async_main() -> None:
     """Главная async функция."""
     root = find_project_root()
@@ -487,6 +517,9 @@ async def async_main() -> None:
 
     # Защита от параллельного запуска (systemd + docker compose, и т.п.)
     _acquire_singleton_lock(agents)
+
+    # Проверить bwrap для агентов с bubblewrap sandbox
+    _check_bubblewrap_requirements(agents)
 
     # Глобальный семафор для Claude CLI
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLAUDE)

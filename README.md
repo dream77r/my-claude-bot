@@ -422,6 +422,7 @@ Each agent is a separate Telegram bot with isolated memory. The Orchestrator aut
 - Bot access restricted to specified Telegram IDs (`allowed_users`)
 - Claude CLI runs with a limited set of tools (`allowedTools`)
 - **Master/worker isolation:** only `me` (the master orchestrator) has unrestricted access; every other agent runs inside its own `agents/{name}/` folder with a scoped tool allowlist and cannot read or write outside it
+- **Bash sandbox (optional, Linux):** opt-in kernel-level isolation via bubblewrap. Add `sandbox.bubblewrap: true` to a worker's `agent.yaml`, install `bwrap` (`sudo apt-get install -y bubblewrap`), and the Claude CLI runs bash commands in a namespace-isolated view of the filesystem — protecting against clever bash that would otherwise bypass path-based hooks. Defense-in-depth on top of the existing `sandbox.py` hook.
 - Each agent's memory is isolated (its own `memory/`)
 - Git-versioned memory with rollback capability (`/restore`)
 - Group chats: owner's personal data never exposed in group system prompts
