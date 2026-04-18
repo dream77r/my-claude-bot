@@ -473,10 +473,19 @@ def _check_bubblewrap_requirements(agents: list[Agent]) -> None:
     """
     import shutil
 
-    agents_wanting_bwrap = [
-        a for a in agents
-        if a.config.get("sandbox", {}).get("bubblewrap", False)
-    ]
+    # Worker без явного "bubblewrap: false" тоже в списке — дефолт
+    # флипнут (см. Agent._build_bash_sandbox_settings). Master не
+    # включается никогда без allow_master_bwrap.
+    def _wants_bwrap(a: Agent) -> bool:
+        sb = a.config.get("sandbox", {})
+        default_on = not a.is_master
+        if not sb.get("bubblewrap", default_on):
+            return False
+        if a.is_master and not sb.get("allow_master_bwrap", False):
+            return False
+        return True
+
+    agents_wanting_bwrap = [a for a in agents if _wants_bwrap(a)]
     if not agents_wanting_bwrap:
         return
 

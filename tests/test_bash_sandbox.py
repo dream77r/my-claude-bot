@@ -17,9 +17,21 @@ def worker_agent():
     return Agent("agents/coder/agent.yaml")
 
 
-def test_default_no_sandbox(worker_agent):
-    """Без явного opt-in bash sandbox не включается."""
-    assert worker_agent._build_bash_sandbox_settings({}) is None
+def test_worker_default_is_sandboxed(worker_agent):
+    """Worker без явной конфигурации → bwrap ON (secure by default)."""
+    settings = worker_agent._build_bash_sandbox_settings({})
+    assert settings is not None
+    assert settings["enabled"] is True
+
+
+def test_worker_explicit_false_opts_out(worker_agent):
+    """Явный bubblewrap: false — opt-out для trusted dev-агентов (coder)."""
+    assert worker_agent._build_bash_sandbox_settings({"bubblewrap": False}) is None
+
+
+def test_master_default_no_sandbox(master_agent):
+    """Master без конфига — без sandbox. Нужен полный доступ."""
+    assert master_agent._build_bash_sandbox_settings({}) is None
 
 
 def test_worker_bubblewrap_enabled(worker_agent):
@@ -99,18 +111,40 @@ class TestCheckBubblewrapRequirements:
     """Startup check: агент просит bwrap → должен быть установлен."""
 
     def test_no_agents_want_bwrap_is_noop(self, monkeypatch):
+        """Если все агенты — master без allow_master_bwrap или worker с
+        explicit opt-out, startup check не делает ничего."""
         from src.main import _check_bubblewrap_requirements
 
         called = []
         monkeypatch.setattr("shutil.which", lambda _: called.append(_))
 
-        class Stub:
-            config = {"sandbox": {"bubblewrap": False}}
+        class MasterStub:
+            config = {"sandbox": {}}
             name = "me"
+            is_master = True
 
-        _check_bubblewrap_requirements([Stub()])
-        # which даже не вызывался
+        class CoderStub:
+            config = {"sandbox": {"bubblewrap": False}}
+            name = "coder"
+            is_master = False
+
+        _check_bubblewrap_requirements([MasterStub(), CoderStub()])
         assert called == []
+
+    def test_worker_default_triggers_check(self, monkeypatch, caplog):
+        """Worker без явной конфигурации попадает в список 'хотят bwrap'."""
+        from src.main import _check_bubblewrap_requirements
+
+        monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/bwrap")
+
+        class Stub:
+            config = {"sandbox": {}}
+            name = "new_custom_bot"
+            is_master = False
+
+        with caplog.at_level("INFO"):
+            _check_bubblewrap_requirements([Stub()])
+        assert "new_custom_bot" in caplog.text
 
     def test_bwrap_installed_passes(self, monkeypatch, caplog):
         from src.main import _check_bubblewrap_requirements
@@ -120,6 +154,7 @@ class TestCheckBubblewrapRequirements:
         class Stub:
             config = {"sandbox": {"bubblewrap": True}}
             name = "coder"
+            is_master = False
 
         with caplog.at_level("INFO"):
             _check_bubblewrap_requirements([Stub()])
@@ -134,6 +169,7 @@ class TestCheckBubblewrapRequirements:
         class Stub:
             config = {"sandbox": {"bubblewrap": True}}
             name = "coder"
+            is_master = False
 
         stub = Stub()
         with caplog.at_level("WARNING"):

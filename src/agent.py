@@ -656,17 +656,27 @@ class Agent:
         Собрать SandboxSettings для Claude CLI (bubblewrap на Linux,
         sandbox-exec на macOS).
 
-        Включается только если явно прописано в agent.yaml:
-            sandbox:
-              bubblewrap: true
-              bubblewrap_excluded_commands:  # опционально
-                - git
-              bubblewrap_network_proxy: 8118  # опционально, HTTP proxy
+        Дефолты:
+        - master: bwrap OFF (нужен полный доступ — backup, systemd и пр.)
+        - worker: bwrap ON, если не прописано явно `bubblewrap: false`
 
-        Master по умолчанию без sandbox. Воркеры включают по opt-in —
-        чтобы не ломать setup где bwrap ещё не установлен.
+        Opt-out (worker'у реально нужен доступ наружу — как coder'у):
+            sandbox:
+              bubblewrap: false
+
+        Расширенная настройка:
+            sandbox:
+              bubblewrap: true                        # явное включение
+              bubblewrap_excluded_commands: [git]     # команды вне sandbox'а
+              bubblewrap_network_proxy: 8118          # HTTP proxy порт
+              bubblewrap_nested: true                 # Docker без --privileged
+
+        Если bwrap не установлен — main._check_bubblewrap_requirements
+        ставит флаг _bwrap_unavailable, и здесь мы возвращаем None
+        (graceful degrade до hook-only sandbox).
         """
-        if not sandbox_config.get("bubblewrap", False):
+        bwrap_default = not self.is_master
+        if not sandbox_config.get("bubblewrap", bwrap_default):
             return None
         # Флаг от main._check_bubblewrap_requirements — если bwrap не
         # установлен, мы деградируем до no-sandbox вместо падения.
