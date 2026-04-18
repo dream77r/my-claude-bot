@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .a2a.cards import build_router as _a2a_cards_router
 from .a2a.server import build_router as _a2a_server_router
+from .miniapp.actions import build_router as _miniapp_actions_router
 from .miniapp.auth import AuthenticatedUser, get_current_user
 from .miniapp.cockpit import build_router as _miniapp_cockpit_router
 from .miniapp.routes import build_router as _miniapp_router
@@ -81,6 +82,7 @@ def create_app(
 
     app.include_router(_miniapp_router())
     app.include_router(_miniapp_cockpit_router())
+    app.include_router(_miniapp_actions_router())
     app.include_router(_a2a_cards_router())
     if bus is not None:
         app.include_router(_a2a_server_router(bus))

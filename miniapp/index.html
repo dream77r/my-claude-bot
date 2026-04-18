@@ -12,7 +12,7 @@
     <header class="hdr">
       <div class="hdr-title">
         <span class="dot" id="conn-dot" aria-hidden="true"></span>
-        <h1>Cockpit</h1>
+        <h1 id="hdr-heading">Cockpit</h1>
       </div>
       <button id="refresh" class="btn-icon" aria-label="Обновить">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -24,34 +24,61 @@
       </button>
     </header>
 
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="cockpit" role="tab">Кокпит</button>
+      <button class="tab" data-tab="brain" role="tab">Мозг</button>
+      <button class="tab" data-tab="market" role="tab">Маркет</button>
+    </nav>
+
     <main id="app">
-      <section class="stats" aria-label="Метрики дня">
-        <div class="stats-tile">
-          <div class="stats-label">Вызовов</div>
-          <div class="stats-value" data-stat="total_calls">—</div>
-        </div>
-        <div class="stats-tile">
-          <div class="stats-label">Ошибок</div>
-          <div class="stats-value" data-stat="errors">—</div>
-        </div>
-        <div class="stats-tile">
-          <div class="stats-label">Tool calls</div>
-          <div class="stats-value" data-stat="tool_calls">—</div>
-        </div>
-        <div class="stats-tile">
-          <div class="stats-label">Latency ~</div>
-          <div class="stats-value" data-stat="avg_latency">—</div>
-        </div>
+      <section class="view" data-view="cockpit">
+        <section class="stats" aria-label="Метрики дня">
+          <div class="stats-tile">
+            <div class="stats-label">Вызовов</div>
+            <div class="stats-value" data-stat="total_calls">—</div>
+          </div>
+          <div class="stats-tile">
+            <div class="stats-label">Ошибок</div>
+            <div class="stats-value" data-stat="errors">—</div>
+          </div>
+          <div class="stats-tile">
+            <div class="stats-label">Tool calls</div>
+            <div class="stats-value" data-stat="tool_calls">—</div>
+          </div>
+          <div class="stats-tile">
+            <div class="stats-label">Latency ~</div>
+            <div class="stats-value" data-stat="avg_latency">—</div>
+          </div>
+        </section>
+
+        <section aria-label="Агенты">
+          <h2 class="section-title">Агенты</h2>
+          <div class="agents" id="agents"></div>
+        </section>
+
+        <section aria-label="Активность">
+          <h2 class="section-title">Последнее</h2>
+          <ul class="feed" id="feed"></ul>
+        </section>
       </section>
 
-      <section aria-label="Агенты">
-        <h2 class="section-title">Агенты</h2>
-        <div class="agents" id="agents"></div>
+      <section class="view hidden" data-view="brain">
+        <div class="brain-top">
+          <select id="brain-agent" aria-label="Агент"></select>
+          <button id="brain-back" class="btn-mini hidden">← Назад</button>
+        </div>
+        <div class="brain-path" id="brain-path"></div>
+        <ul class="tree" id="brain-tree"></ul>
+        <article class="brain-content hidden" id="brain-content"></article>
       </section>
 
-      <section aria-label="Активность">
-        <h2 class="section-title">Последнее</h2>
-        <ul class="feed" id="feed"></ul>
+      <section class="view hidden" data-view="market">
+        <div class="market-top">
+          <input type="search" id="market-search" placeholder="Поиск по скиллам…" />
+          <button id="market-refresh" class="btn-mini">Обновить пул</button>
+        </div>
+        <div id="market-status" class="market-status hidden"></div>
+        <ul class="market-list" id="market-list"></ul>
       </section>
 
       <p id="err" class="err hidden" role="alert"></p>
