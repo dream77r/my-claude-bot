@@ -693,6 +693,13 @@ async def async_main() -> None:
 def main() -> None:
     """Точка входа (синхронная)."""
     try:
+        import uvloop
+    except ImportError:
+        logger.info("uvloop unavailable, using default asyncio event loop")
+    else:
+        uvloop.install()
+        logger.info("uvloop enabled")
+    try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C")
