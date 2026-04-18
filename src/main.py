@@ -629,9 +629,9 @@ async def async_main() -> None:
             logger.info(f"Cron запущен для '{agent.name}': {', '.join(cron_names)}")
 
     # ── Dispatcher ──
-    # Поллит memory/dispatch/ у каждого агента и публикует готовые
-    # сообщения в bus с явным chat_id+thread_id. Запускается для всех
-    # агентов: оверхед от glob пустой папки раз в 5 секунд незаметен.
+    # Смотрит memory/dispatch/ у каждого агента через inotify (fallback —
+    # поллинг 5 сек) и публикует готовые сообщения в bus с явным
+    # chat_id+thread_id. Запускается для всех агентов.
     for agent in agents:
         dispatch_task = asyncio.create_task(
             dispatcher_loop(agent.agent_dir, agent.name, bus=bus)

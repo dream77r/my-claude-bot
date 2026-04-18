@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 
 from .bus import FleetBus, FleetMessage, MessageType
+from .fs_watcher import DirectoryWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -172,27 +173,31 @@ async def dispatcher_loop(
         poll_interval: интервал поллинга в секундах
     """
     dispatch = _dispatch_dir(agent_dir)
-    dispatch.mkdir(parents=True, exist_ok=True)
+    watcher = DirectoryWatcher(dispatch)
+    watcher.start()
 
     logger.info(
         f"Dispatcher loop запущен для '{agent_name}': "
-        f"{dispatch} (interval={poll_interval}s)"
+        f"{dispatch} (mode={watcher.mode}, safety_interval={poll_interval}s)"
     )
 
-    while True:
-        try:
-            await asyncio.sleep(poll_interval)
+    try:
+        while True:
+            try:
+                await watcher.wait(timeout=poll_interval)
 
-            files = sorted(
-                p for p in dispatch.glob("*.json") if p.is_file()
-            )[:MAX_DISPATCH_PER_CYCLE]
+                files = sorted(
+                    p for p in dispatch.glob("*.json") if p.is_file()
+                )[:MAX_DISPATCH_PER_CYCLE]
 
-            for path in files:
-                await _publish_one(path, agent_name, bus)
+                for path in files:
+                    await _publish_one(path, agent_name, bus)
 
-        except asyncio.CancelledError:
-            logger.info(f"Dispatcher loop '{agent_name}' остановлен")
-            break
-        except Exception as e:
-            logger.error(f"Dispatcher loop error: {e}")
-            await asyncio.sleep(poll_interval)
+            except asyncio.CancelledError:
+                logger.info(f"Dispatcher loop '{agent_name}' остановлен")
+                break
+            except Exception as e:
+                logger.error(f"Dispatcher loop error: {e}")
+                await asyncio.sleep(poll_interval)
+    finally:
+        watcher.stop()

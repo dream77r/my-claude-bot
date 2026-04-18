@@ -16,11 +16,16 @@ import uuid
 from pathlib import Path
 
 from .bus import FleetBus, FleetMessage, MessageType
+from .fs_watcher import DirectoryWatcher
 
 logger = logging.getLogger(__name__)
 
 # Таймаут ожидания ответа от делегированного агента
 DELEGATION_TIMEOUT = 600
+# Safety-net scan интервал, когда inotify активен — на всякий случай
+# проверяем папку, даже если событие не пришло (например, событие fs
+# потерялось или файл создан до старта observer).
+WATCH_SAFETY_INTERVAL = 5.0
 
 
 class DelegationManager:
@@ -34,23 +39,29 @@ class DelegationManager:
 
     async def watch(self) -> None:
         """Бесконечный цикл проверки новых task-файлов."""
-        self.delegation_dir.mkdir(parents=True, exist_ok=True)
+        watcher = DirectoryWatcher(self.delegation_dir)
+        watcher.start()
         logger.info(
             f"DelegationManager '{self.agent_name}' запущен, "
-            f"мониторит {self.delegation_dir}"
+            f"мониторит {self.delegation_dir} (mode={watcher.mode})"
         )
 
-        while True:
-            try:
-                await asyncio.sleep(1)
-                for task_file in self.delegation_dir.glob("*.task.md"):
-                    target_agent = task_file.name.replace(".task.md", "")
-                    await self._process_delegation(target_agent, task_file)
-            except asyncio.CancelledError:
-                logger.info(f"DelegationManager '{self.agent_name}' остановлен")
-                break
-            except Exception as e:
-                logger.error(f"DelegationManager error: {e}")
+        try:
+            while True:
+                try:
+                    await watcher.wait(timeout=WATCH_SAFETY_INTERVAL)
+                    for task_file in self.delegation_dir.glob("*.task.md"):
+                        target_agent = task_file.name.replace(".task.md", "")
+                        await self._process_delegation(target_agent, task_file)
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"DelegationManager '{self.agent_name}' остановлен"
+                    )
+                    break
+                except Exception as e:
+                    logger.error(f"DelegationManager error: {e}")
+        finally:
+            watcher.stop()
 
     async def _process_delegation(self, target: str, task_file: Path) -> None:
         """Обработать одну делегацию."""
