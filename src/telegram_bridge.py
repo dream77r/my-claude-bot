@@ -2831,6 +2831,18 @@ class TelegramBridge:
                         if agent_dir:
                             clear_outbox(agent_dir)
 
+                elif event == "interrupted":
+                    # Stream interruption: прежняя задача отменена из-за
+                    # нового сообщения. Финализируем статус, сохранив то,
+                    # что пользователь уже видел, с пометкой прерывания.
+                    status = self._status_messages.pop(chat_id, None)
+                    if status:
+                        partial = status.current_text() or ""
+                        if partial.strip():
+                            await status.finalize(f"{partial}\n\n_(прервано)_")
+                        else:
+                            await status.cleanup()
+
                 elif event == "error":
                     status = self._status_messages.pop(chat_id, None)
                     if status:

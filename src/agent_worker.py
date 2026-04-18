@@ -50,6 +50,26 @@ class AgentWorker:
             return True
         return False
 
+    async def _preempt_active_task(self, chat_id: int) -> bool:
+        """Graceful cancel активной задачи для chat_id (stream interruption).
+
+        Юзер пишет новое сообщение пока предыдущее ещё обрабатывается —
+        предыдущую задачу отменяем, чтобы не держать два стрима и не
+        тратить модель на устаревший запрос. Возвращает True если что-то
+        отменили (вызывающий публикует interrupted-событие).
+        """
+        old = self._active_tasks.get(chat_id)
+        if not old or old.done():
+            return False
+        old.cancel()
+        try:
+            await asyncio.wait_for(old, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
+        return True
+
     def is_busy(self) -> bool:
         """True если есть незавершённые задачи."""
         return any(not t.done() for t in self._active_tasks.values())
@@ -71,6 +91,27 @@ class AgentWorker:
         while self._running:
             try:
                 msg = await self.bus.consume(self._queue_name)
+                # Stream interruption: если для этого chat_id уже
+                # обрабатывается задача, отменяем её до старта новой.
+                # Delegation-сообщения (AGENT_TO_AGENT) не трогаем: у них
+                # chat_id=0 и они не конкурируют с пользовательским трафиком.
+                if (
+                    msg.chat_id
+                    and msg.msg_type != MessageType.AGENT_TO_AGENT
+                    and await self._preempt_active_task(msg.chat_id)
+                ):
+                    thread_id = msg.metadata.get("message_thread_id")
+                    interrupt_meta = {"event": "interrupted"}
+                    if thread_id:
+                        interrupt_meta["message_thread_id"] = thread_id
+                    await self.bus.publish(FleetMessage(
+                        source=f"agent:{self.agent.name}",
+                        target=f"telegram:{self.agent.name}",
+                        content="",
+                        msg_type=MessageType.SYSTEM,
+                        chat_id=msg.chat_id,
+                        metadata=interrupt_meta,
+                    ))
                 # Обработать в отдельной задаче (не блокируем очередь)
                 task = asyncio.create_task(self._handle_message(msg))
                 if msg.chat_id:
@@ -185,7 +226,11 @@ class AgentWorker:
                 metadata={**base_meta, "event": "error", "error": str(e)},
             ))
         finally:
-            self._active_tasks.pop(chat_id, None)
+            # Identity check: pop только если в словаре всё ещё наша задача.
+            # Иначе мы могли бы удалить только что созданный task-преемник.
+            current = asyncio.current_task()
+            if chat_id and self._active_tasks.get(chat_id) is current:
+                self._active_tasks.pop(chat_id, None)
 
     async def _handle_delegation(self, msg: FleetMessage) -> None:
         """Обработать делегированное сообщение от другого агента."""

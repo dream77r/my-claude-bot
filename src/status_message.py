@@ -44,10 +44,16 @@ class StatusMessage:
         self._thinking_start: float | None = None
         self._thinking_timer_task: asyncio.Task | None = None
         self._is_streaming: bool = False
+        self._last_text: str = ""
+
+    def current_text(self) -> str:
+        """Последний текст, показанный пользователю (для stream interruption)."""
+        return self._last_text
 
     async def show(self, text: str, streaming: bool = False) -> None:
         """Показать или обновить статус (с coalescing)."""
         self._is_streaming = streaming
+        self._last_text = text
         interval = STREAM_EDIT_INTERVAL if streaming else EDIT_MIN_INTERVAL
         now = time.monotonic()
         elapsed = now - self._last_edit

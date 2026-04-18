@@ -102,3 +102,87 @@ class TestAgentWorker:
     def test_cancel_task_no_active(self, worker):
         """cancel_task возвращает False если нет задачи."""
         assert worker.cancel_task(999) is False
+
+
+class TestStreamInterruption:
+    @pytest.mark.asyncio
+    async def test_preempt_cancels_running_task(self, worker):
+        """Активная задача отменяется при поступлении нового сообщения."""
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def slow_call(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return "not reached"
+
+        worker.agent.call_claude = AsyncMock(side_effect=slow_call)
+
+        msg = FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="first",
+            chat_id=123,
+        )
+        task = asyncio.create_task(worker._handle_message(msg))
+        worker._active_tasks[123] = task
+        await started.wait()
+        assert 123 in worker._active_tasks
+
+        preempted = await worker._preempt_active_task(123)
+        assert preempted is True
+        assert cancelled.is_set()
+        # Identity-check в finally должен был удалить запись сам
+        assert 123 not in worker._active_tasks
+
+    @pytest.mark.asyncio
+    async def test_preempt_noop_when_no_active_task(self, worker):
+        assert await worker._preempt_active_task(999) is False
+
+    @pytest.mark.asyncio
+    async def test_preempt_noop_when_task_done(self, worker):
+        done = asyncio.get_event_loop().create_future()
+        done.set_result(None)
+        worker._active_tasks[123] = done  # type: ignore[assignment]
+        assert await worker._preempt_active_task(123) is False
+
+    @pytest.mark.asyncio
+    async def test_finally_does_not_evict_successor(self, worker, bus):
+        """Identity-check: finally старой задачи не должен удалять новую запись.
+
+        Это регрессионный тест на race condition: раньше `_active_tasks.pop`
+        был безусловным и мог выкинуть task-преемника из словаря.
+        """
+        bus.subscribe("telegram:test")
+
+        async def finishing_call(*args, **kwargs):
+            return "fast"
+
+        worker.agent.call_claude = AsyncMock(side_effect=finishing_call)
+
+        # Запускаем первую задачу и даём ей завершиться
+        first_msg = FleetMessage(
+            source="telegram:123", target="agent:test",
+            content="m1", chat_id=123,
+        )
+        first_task = asyncio.create_task(worker._handle_message(first_msg))
+        worker._active_tasks[123] = first_task
+
+        # Перед завершением первой — перезаписываем запись будущей-second task
+        # (эмулируем ситуацию когда run() уже подменил запись)
+        sentinel_task = asyncio.create_task(asyncio.sleep(0))
+        worker._active_tasks[123] = sentinel_task
+
+        await first_task  # ждём чтобы finally отработал
+
+        # Запись sentinel должна сохраниться
+        assert worker._active_tasks.get(123) is sentinel_task
+        sentinel_task.cancel()
+        try:
+            await sentinel_task
+        except asyncio.CancelledError:
+            pass
