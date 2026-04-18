@@ -122,14 +122,13 @@ class TestLogMessage:
         log = get_memory_path(agent_dir) / "log.md"
         assert "assistant: Вот ответ" in log.read_text()
 
-    def test_truncates_long_message_in_daily(self, agent_dir):
+    def test_preserves_long_message_in_daily(self, agent_dir):
         long_msg = "x" * 1000
         log_message(agent_dir, "user", long_msg)
         daily_dir = get_memory_path(agent_dir) / "daily"
         files = list(daily_dir.glob("*.md"))
         content = files[0].read_text()
-        # daily note обрезает до 500 символов
-        assert len(content) < 700
+        assert long_msg in content
 
 
 class TestReadContext:
