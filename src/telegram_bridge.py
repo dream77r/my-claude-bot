@@ -19,7 +19,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    WebAppInfo,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -98,6 +104,7 @@ BOT_COMMANDS = [
     BotCommand("refreshpool", "Обновить кэш пула скиллов"),
     BotCommand("restart", "Перезапустить платформу"),
     BotCommand("newkey", "Создать ключ доступа для пользователя"),
+    BotCommand("dashboard", "Открыть веб-дэшборд (Mini App)"),
 ]
 
 # Доступные модели Claude
@@ -323,6 +330,9 @@ class TelegramBridge:
         router.exact("/poolskills", self._cmd_poolskills)
         router.exact("/installskill", self._cmd_installskill)
         router.exact("/refreshpool", self._cmd_refreshpool)
+
+        # Mini App dashboard
+        router.exact("/dashboard", self._cmd_dashboard)
 
         # Multi-user access key commands
         router.exact("/newkey", self._cmd_newkey)
@@ -2028,6 +2038,37 @@ class TelegramBridge:
                 update, context,
                 f"Пул склонирован, но manifest.json не читается: {e}"
             )
+
+    # ── Mini App dashboard ──
+
+    async def _cmd_dashboard(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Открыть Telegram Mini App с дэшбордом."""
+        url = os.environ.get("MINIAPP_URL", "").strip()
+        if not url:
+            await self._reply(
+                update, context,
+                "Дэшборд ещё не настроен. Администратор должен "
+                "задать MINIAPP_URL в .env (требуется HTTPS).",
+            )
+            return
+        if not url.startswith("https://"):
+            await self._reply(
+                update, context,
+                "Дэшборд требует HTTPS-URL (ограничение Telegram WebApp).",
+            )
+            return
+
+        separator = "&" if "?" in url else "?"
+        launch_url = f"{url}{separator}origin_agent={self.agent.name}"
+        button = InlineKeyboardButton(
+            "Открыть дэшборд", web_app=WebAppInfo(url=launch_url)
+        )
+        await update.effective_message.reply_text(
+            "Mini App агента «{}»:".format(self.agent.display_name),
+            reply_markup=InlineKeyboardMarkup([[button]]),
+        )
 
     # ── GitHub Backup commands ──
 

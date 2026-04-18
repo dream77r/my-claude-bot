@@ -41,6 +41,7 @@ from .delegation import DelegationManager
 from .dispatcher import dispatcher_loop
 from .dream import dream_loop
 from .github_sync import github_sync_loop
+from .http_server import serve_forever as http_serve_forever
 from .knowledge_graph import nightly_graph_loop
 from .heartbeat import heartbeat_loop
 from .orchestrator import Orchestrator
@@ -672,6 +673,11 @@ async def async_main() -> None:
     )
     tasks.append(github_sync_task)
     logger.info("GitHub Sync loop запущен: ежедневно в 03:00 UTC")
+
+    # ── HTTP sidecar (Mini App + A2A) ──
+    # Не запускается если HTTP_PORT пуст/0. Логирует свой статус сам.
+    http_task = asyncio.create_task(http_serve_forever(runtime))
+    tasks.append(http_task)
 
     logger.info(
         f"Fleet запущен: {len(agents)} агентов, "
