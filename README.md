@@ -87,10 +87,27 @@ Open Telegram and message your bot — it handles everything else (onboarding, l
 ## Updating
 
 ```bash
-cd ~/my-claude-bot && git pull && ./update.sh
+cd ~/my-claude-bot && ./update.sh
 ```
 
-One command: pulls the latest code, updates dependencies if needed, and restarts the service. Your data is safe -- `.env`, agent memory, `SOUL.md`, and settings are never touched.
+One command: fetches the latest code, runs the overlay migration (see below)
+if needed, updates dependencies, and restarts the service. Your data is
+safe — `.env`, agent memory, `SOUL.md`, and settings are never touched.
+
+### First update after April 2026 (one-time)
+
+If you customized any `agents/*/agent.yaml` by hand (e.g. `allowed_users`,
+custom model, your own `system_prompt`), the normal `git pull` will fail
+with `Your local changes to the following files would be overwritten`.
+Run this one-liner **once per affected server** — it safely preserves
+your customizations by migrating them into `agent.local.yaml`:
+
+```bash
+cd ~/my-claude-bot && curl -sSL https://raw.githubusercontent.com/dream77r/my-claude-bot/main/scripts/bootstrap_overlay.sh | bash
+```
+
+After it finishes, `./update.sh` works as usual forever. Servers that
+*didn't* touch `agent.yaml` don't need this — just `./update.sh`.
 
 ## Running with systemd (recommended)
 
