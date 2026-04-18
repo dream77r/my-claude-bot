@@ -121,7 +121,7 @@ async def analyze_patterns(
         Список предложений по скиллам
     """
     from . import get_claude_cli_path
-    from .dream import _call_claude_simple, _extract_json
+    from .dream import _call_claude_simple, _extract_json, _substitute
 
     memory_path = memory.get_memory_path(agent_dir)
 
@@ -143,9 +143,12 @@ async def analyze_patterns(
     wiki_index = _read_file_safe(memory_path / "index.md")
     current_skills = _get_current_skills(agent_dir)
 
-    # Загрузить промпт
+    # Загрузить промпт. _substitute, а не str.format(), потому что
+    # шаблон содержит литеральные `{` внутри JSON-примера ответа —
+    # str.format() на них падает (тот же баг, что был в dream).
     prompt_template = _load_analysis_prompt(agent_dir)
-    prompt = prompt_template.format(
+    prompt = _substitute(
+        prompt_template,
         profile=profile or "(профиль не заполнен)",
         conversations=_format_conversations(conversations),
         current_skills=current_skills or "(скиллов нет)",

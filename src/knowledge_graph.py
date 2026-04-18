@@ -359,40 +359,13 @@ def should_run_synthesis(agent_dir: str, config: dict) -> bool:
     return days_since_last >= regular_interval
 
 
-async def _call_claude_simple(
-    prompt: str,
-    model: str = "haiku",
-    cwd: str | None = None,
-) -> str:
-    """Простой LLM-вызов (без tools)."""
-    options = ClaudeAgentOptions(
-        model=model,
-        permission_mode="bypassPermissions",
-        cli_path=get_claude_cli_path(),
-    )
-    if cwd:
-        options.cwd = cwd
-
-    result_text = ""
-    async for msg in query(prompt=prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    result_text += block.text
-        elif isinstance(msg, ResultMessage):
-            if msg.result and not result_text:
-                result_text = msg.result
-
-    return result_text
-
-
 async def _call_claude_agent(
     prompt: str,
     model: str = "haiku",
     cwd: str | None = None,
     allowed_tools: list[str] | None = None,
 ) -> str:
-    """Агентный вызов Claude (с tools)."""
+    """LLM-вызов Claude. С tools — агентный режим, без — простой."""
     options = ClaudeAgentOptions(
         model=model,
         permission_mode="bypassPermissions",
@@ -414,6 +387,15 @@ async def _call_claude_agent(
                 result_text = msg.result
 
     return result_text
+
+
+async def _call_claude_simple(
+    prompt: str,
+    model: str = "haiku",
+    cwd: str | None = None,
+) -> str:
+    """Простой LLM-вызов (без tools). Shim вокруг _call_claude_agent."""
+    return await _call_claude_agent(prompt, model=model, cwd=cwd)
 
 
 def _load_template(agent_dir: str, template_name: str) -> str:

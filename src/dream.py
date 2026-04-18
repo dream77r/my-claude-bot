@@ -109,36 +109,6 @@ def _substitute(template: str, **values: str) -> str:
     return result
 
 
-async def _call_claude_simple(
-    prompt: str,
-    model: str = "haiku",
-    cwd: str | None = None,
-    system_prompt: str | None = None,
-) -> str:
-    """Простой (не-агентный) вызов Claude для Phase 1."""
-    options = ClaudeAgentOptions(
-        model=model,
-        permission_mode="bypassPermissions",
-        cli_path=get_claude_cli_path(),
-    )
-    if cwd:
-        options.cwd = cwd
-    if system_prompt:
-        options.system_prompt = system_prompt
-
-    result_text = ""
-    async for msg in query(prompt=prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    result_text += block.text
-        elif isinstance(msg, ResultMessage):
-            if msg.result and not result_text:
-                result_text = msg.result
-
-    return result_text
-
-
 async def _call_claude_agent(
     prompt: str,
     model: str = "sonnet",
@@ -146,7 +116,7 @@ async def _call_claude_agent(
     allowed_tools: list[str] | None = None,
     system_prompt: str | None = None,
 ) -> str:
-    """Агентный вызов Claude для Phase 2 (с tools)."""
+    """Агентный вызов Claude. С tools — Phase 2, без — Phase 1."""
     options = ClaudeAgentOptions(
         model=model,
         permission_mode="bypassPermissions",
@@ -170,6 +140,20 @@ async def _call_claude_agent(
                 result_text = msg.result
 
     return result_text
+
+
+async def _call_claude_simple(
+    prompt: str,
+    model: str = "haiku",
+    cwd: str | None = None,
+    system_prompt: str | None = None,
+) -> str:
+    """Простой (не-агентный) вызов Claude для Phase 1. Shim для
+    обратной совместимости: импортируется из `skill_advisor`,
+    `schema_advisor`, `skill_creator`."""
+    return await _call_claude_agent(
+        prompt, model=model, cwd=cwd, system_prompt=system_prompt
+    )
 
 
 async def dream_cycle(
