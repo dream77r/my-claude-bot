@@ -23,6 +23,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MenuButtonWebApp,
     Update,
     WebAppInfo,
 )
@@ -105,6 +106,7 @@ BOT_COMMANDS = [
     BotCommand("restart", "Перезапустить платформу"),
     BotCommand("newkey", "Создать ключ доступа для пользователя"),
     BotCommand("dashboard", "Открыть веб-дэшборд (Mini App)"),
+    BotCommand("setup_dashboard", "Настроить дэшборд (мастер)"),
 ]
 
 # Доступные модели Claude
@@ -333,6 +335,7 @@ class TelegramBridge:
 
         # Mini App dashboard
         router.exact("/dashboard", self._cmd_dashboard)
+        router.exact("/setup_dashboard", self._cmd_setup_dashboard)
 
         # Multi-user access key commands
         router.exact("/newkey", self._cmd_newkey)
@@ -428,6 +431,7 @@ class TelegramBridge:
     _OWNER_ONLY_COMMANDS = {
         "/model", "/restore", "/dream", "/newsession", "/memory", "/start",
         "/agents", "/create_agent", "/stop_agent", "/start_agent", "/restart",
+        "/setup_dashboard",
     }
 
     # ── Unified command handler ──
@@ -2069,6 +2073,122 @@ class TelegramBridge:
             "Mini App агента «{}»:".format(self.agent.display_name),
             reply_markup=InlineKeyboardMarkup([[button]]),
         )
+
+    async def _cmd_setup_dashboard(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """One-click настройка дэшборда: nginx + HTTPS + меню. Только master."""
+        from .miniapp import setup_flow
+
+        if not self.agent.is_master:
+            await self._reply(
+                update, context,
+                "Эта команда доступна только master-агенту."
+            )
+            return
+
+        tokens = args.strip().split()
+        if not tokens:
+            await self._reply(
+                update, context,
+                "Использование: /setup_dashboard <domain> [email]\n"
+                "Пример: /setup_dashboard bot.example.com you@example.com\n\n"
+                "Что произойдёт:\n"
+                "• Проверю DNS домена\n"
+                "• Подберу свободный порт\n"
+                "• Настрою nginx и выпущу HTTPS через Let's Encrypt\n"
+                "• Обновлю .env и активирую кнопку меню Mini App\n"
+                "• Перезапущу бота"
+            )
+            return
+
+        try:
+            domain = setup_flow.validate_domain(tokens[0])
+        except ValueError as e:
+            await self._reply(update, context, f"Невалидный домен: {e}")
+            return
+
+        email: str | None = None
+        if len(tokens) >= 2:
+            try:
+                email = setup_flow.validate_email(tokens[1])
+            except ValueError as e:
+                await self._reply(update, context, f"Невалидный email: {e}")
+                return
+
+        if not await setup_flow.sudoers_ready():
+            await self._reply(
+                update, context,
+                "Не могу запустить helper: sudo NOPASSWD не настроен.\n"
+                "Включите один раз на сервере:\n"
+                "    ./setup.sh --enable-dashboard\n"
+                "и повторите /setup_dashboard."
+            )
+            return
+
+        await self._reply(update, context, f"Проверяю DNS для {domain}…")
+        try:
+            ip = await setup_flow.check_dns(domain)
+        except ValueError as e:
+            await self._reply(
+                update, context,
+                f"{e}\n\nПроверьте что A-запись домена указывает на этот "
+                "сервер и DNS успел распространиться."
+            )
+            return
+
+        await self._reply(update, context, f"DNS OK → {ip}. Подбираю порт…")
+        try:
+            port = setup_flow.pick_free_port()
+        except RuntimeError as e:
+            await self._reply(update, context, f"Не нашёл свободный порт: {e}")
+            return
+
+        await self._reply(
+            update, context,
+            f"Порт {port}. Настраиваю nginx + certbot… (до 30 секунд)"
+        )
+
+        ok, output = await setup_flow.run_setup_helper(domain, port, email)
+        if not ok:
+            tail = "\n".join(output.splitlines()[-10:]) or "(нет вывода)"
+            await self._reply(
+                update, context,
+                f"Helper завершился с ошибкой. Последние строки:\n\n{tail}"
+            )
+            return
+
+        try:
+            setup_flow.update_env_file(
+                setup_flow.ENV_PATH,
+                {
+                    "HTTP_PORT": str(port),
+                    "HTTP_HOST": "127.0.0.1",
+                    "PUBLIC_BASE_URL": f"https://{domain}",
+                    "MINIAPP_URL": f"https://{domain}/miniapp/",
+                },
+            )
+        except OSError as e:
+            await self._reply(update, context, f"Не смог записать .env: {e}")
+            return
+
+        menu_url = f"https://{domain}/miniapp/?origin_agent={self.agent.name}"
+        try:
+            await context.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Cockpit",
+                    web_app=WebAppInfo(url=menu_url),
+                )
+            )
+        except Exception as e:
+            logger.warning(f"set_chat_menu_button failed: {e}")
+
+        await self._reply(
+            update, context,
+            f"✅ Готово: https://{domain}/miniapp/\n"
+            "Кнопка меню «Cockpit» активна. Перезапускаюсь…"
+        )
+        await setup_flow.trigger_restart_detached()
 
     # ── GitHub Backup commands ──
 

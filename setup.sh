@@ -18,6 +18,55 @@ RED='\033[31m'
 CYAN='\033[36m'
 RESET='\033[0m'
 
+# ──────────────────────────────────────────────
+# Sub-command: --enable-dashboard
+# One-shot helper that installs the sudoers rule
+# needed for /setup_dashboard in Telegram.
+# Run once; after that the bot can self-provision.
+# ──────────────────────────────────────────────
+if [[ "${1:-}" == "--enable-dashboard" ]]; then
+    PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    HELPER="${PROJECT_DIR}/scripts/setup-dashboard.sh"
+    SUDOERS="/etc/sudoers.d/my-claude-bot"
+
+    if [ ! -x "$HELPER" ]; then
+        echo -e "${RED}  ✗ Helper not found or not executable: ${HELPER}${RESET}"
+        echo "    Make sure you're in the my-claude-bot repo and the script has +x."
+        exit 1
+    fi
+
+    echo -e "${BOLD}Installing sudoers rule for /setup_dashboard…${RESET}"
+    echo "  Target: ${SUDOERS}"
+    echo "  Allows: ${USER} → NOPASSWD: ${HELPER}"
+    echo ""
+
+    TMP="$(mktemp)"
+    cat > "$TMP" <<EOF
+# ${SUDOERS}
+# Installed by ./setup.sh --enable-dashboard
+# Lets the bot provision nginx + Let's Encrypt via /setup_dashboard.
+# The helper itself validates domain/port/email before touching anything.
+
+${USER} ALL=(root) NOPASSWD: ${HELPER}
+EOF
+
+    if ! sudo visudo -cf "$TMP" >/dev/null; then
+        echo -e "${RED}  ✗ visudo validation failed, aborting.${RESET}"
+        rm -f "$TMP"
+        exit 1
+    fi
+
+    sudo install -m 0440 -o root -g root "$TMP" "$SUDOERS"
+    rm -f "$TMP"
+
+    echo -e "${GREEN}  ✓ Sudoers rule installed.${RESET}"
+    echo ""
+    echo -e "  Now open Telegram and run:"
+    echo -e "    ${CYAN}/setup_dashboard <domain> [email]${RESET}"
+    echo ""
+    exit 0
+fi
+
 echo ""
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo -e "${BOLD}  My Claude Bot — Setup                       ${RESET}"
