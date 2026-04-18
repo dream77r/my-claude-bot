@@ -27,6 +27,8 @@ import asyncio
 import logging
 from datetime import datetime
 
+from .task_utils import spawn_supervised
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -103,7 +105,10 @@ class SmartHeartbeat:
 
                     if trigger.should_run(now) and trigger_key not in self._last_run:
                         self._last_run[trigger_key] = minute_key
-                        asyncio.create_task(self._execute_trigger(trigger))
+                        spawn_supervised(
+                            self._execute_trigger(trigger),
+                            name=f"heartbeat:{self.agent_name}:{trigger.name}",
+                        )
                         # Очистить старые записи (оставить только за последний час)
                         self._cleanup_last_run(now)
 

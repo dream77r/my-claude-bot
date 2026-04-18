@@ -28,6 +28,7 @@ from datetime import datetime
 
 from . import get_claude_cli_path
 from .bus import FleetBus, FleetMessage, MessageType
+from .task_utils import spawn_supervised
 
 logger = logging.getLogger(__name__)
 
@@ -215,9 +216,12 @@ async def cron_loop(
             current = datetime.now()
             for job in jobs:
                 if should_run(job.schedule, current):
-                    # Запустить в отдельной задаче (не блокируем цикл)
-                    asyncio.create_task(
-                        _execute_job(job, agent_dir, agent_name, bus, chat_id)
+                    # Запустить в отдельной задаче (не блокируем цикл).
+                    # spawn_supervised: keep strong ref + log exceptions,
+                    # иначе провал cron-джобы уходит в тишину.
+                    spawn_supervised(
+                        _execute_job(job, agent_dir, agent_name, bus, chat_id),
+                        name=f"cron:{agent_name}:{job.name}",
                     )
 
         except asyncio.CancelledError:

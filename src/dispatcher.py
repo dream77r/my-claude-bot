@@ -99,6 +99,22 @@ def _quarantine(path: Path, agent_dir: str) -> None:
         logger.error(f"Dispatcher: карантин {path.name} не удался: {e}")
 
 
+def _inflight_path(path: Path) -> Path:
+    """Mark path as in-flight so the `*.json` scan skips it."""
+    return path.with_suffix(path.suffix + ".inflight")
+
+
+def _try_restore(inflight: Path, original: Path) -> None:
+    """Rename *.json.inflight back to *.json on publish failure."""
+    try:
+        inflight.rename(original)
+    except OSError as e:
+        logger.error(
+            f"Dispatcher: restore {inflight.name} → {original.name} "
+            f"failed: {e}"
+        )
+
+
 async def _publish_one(
     path: Path,
     agent_name: str,
@@ -106,8 +122,18 @@ async def _publish_one(
 ) -> bool:
     """
     Обработать один dispatch-файл. Вернуть True при успехе.
-    При неудаче валидации — поставить в карантин.
-    При неудаче bus.publish — оставить файл для следующего цикла.
+
+    Идемпотентность: перед publish файл атомарно переименовывается в
+    `*.json.inflight`, чтобы последующий scan не подхватил его снова.
+    - Валидация упала → карантин.
+    - publish упал или нет получателей → файл возвращается в *.json.
+    - publish успешен, unlink inflight упал → файл остаётся как
+      .inflight, но больше не публикуется (scan смотрит только *.json).
+      Без двойной доставки.
+    - Процесс умер между rename и publish → .inflight остался. На
+      старте dispatcher_loop такой файл уезжает в карантин, чтобы
+      не рисковать повторной публикацией: для уведомлений юзеру
+      at-most-once предпочтительнее at-least-once.
     """
     payload = _load_and_validate(path)
     if payload is None:
@@ -131,10 +157,20 @@ async def _publish_one(
         metadata=metadata,
     )
 
+    inflight = _inflight_path(path)
+    try:
+        path.rename(inflight)
+    except OSError as e:
+        logger.error(
+            f"Dispatcher: rename {path.name} → .inflight failed: {e}"
+        )
+        return False
+
     try:
         delivered = await bus.publish(msg)
     except Exception as e:
         logger.error(f"Dispatcher: bus.publish упал для {path.name}: {e}")
+        _try_restore(inflight, path)
         return False
 
     if delivered == 0:
@@ -142,19 +178,41 @@ async def _publish_one(
             f"Dispatcher: нет получателей для {path.name} "
             f"(target=telegram:{agent_name}) — оставляю на следующий цикл"
         )
+        _try_restore(inflight, path)
         return False
 
     try:
-        path.unlink()
+        inflight.unlink()
     except OSError as e:
-        logger.error(f"Dispatcher: не могу удалить {path.name}: {e}")
-        return False
+        # publish уже прошёл — файл остаётся как .inflight и не будет
+        # переотправлен (glob ищет *.json). Дубля не будет, только
+        # замусоривание dispatch/, которое видно в логе.
+        logger.warning(
+            f"Dispatcher: unlink {inflight.name} after successful "
+            f"publish failed: {e}. File left as .inflight."
+        )
 
     logger.info(
         f"Dispatcher: отправлено {path.name} → chat_id={payload['chat_id']} "
         f"thread={payload.get('message_thread_id')} source={metadata['source']}"
     )
     return True
+
+
+def _recover_inflight(dispatch: Path, agent_dir: str) -> None:
+    """Quarantine leftover `*.inflight` files from a previous crashed run.
+
+    Called once at startup. We don't know whether publish succeeded, so
+    we prefer at-most-once semantics: quarantine instead of replay.
+    """
+    if not dispatch.is_dir():
+        return
+    for leftover in dispatch.glob("*.inflight"):
+        logger.warning(
+            f"Dispatcher: recovering orphan inflight {leftover.name} "
+            f"from previous run — moving to failed/"
+        )
+        _quarantine(leftover, agent_dir)
 
 
 async def dispatcher_loop(
@@ -175,6 +233,9 @@ async def dispatcher_loop(
     dispatch = _dispatch_dir(agent_dir)
     watcher = DirectoryWatcher(dispatch)
     watcher.start()
+
+    # Recovery: leftover *.inflight из crashed-рана уезжают в карантин.
+    _recover_inflight(dispatch, agent_dir)
 
     logger.info(
         f"Dispatcher loop запущен для '{agent_name}': "
