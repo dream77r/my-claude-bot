@@ -110,6 +110,17 @@ BOT_COMMANDS = [
     BotCommand("setup_dashboard", "Настроить дэшборд (мастер)"),
 ]
 
+# Команды, которые показываются в меню только у master-агента.
+# На non-master ботах они скрываются из `/`-меню (хендлеры остаются
+# зарегистрированными и вернут вежливый отказ, если юзер введёт руками).
+_MASTER_ONLY_COMMAND_NAMES = frozenset({"dashboard", "setup_dashboard"})
+
+
+def _commands_for(is_master: bool) -> list[BotCommand]:
+    if is_master:
+        return BOT_COMMANDS
+    return [c for c in BOT_COMMANDS if c.command not in _MASTER_ONLY_COMMAND_NAMES]
+
 # Доступные модели Claude
 CLAUDE_MODELS = {
     "haiku": "Haiku — быстрая, дешёвая",
@@ -400,7 +411,7 @@ class TelegramBridge:
         """Выполняется после инициализации бота: меню + git."""
         # Зарегистрировать кнопку-меню "/" в Telegram
         try:
-            await app.bot.set_my_commands(BOT_COMMANDS)
+            await app.bot.set_my_commands(_commands_for(self.agent.is_master))
             logger.info(f"Bot menu commands registered for '{self.agent.name}'")
         except Exception as e:
             logger.warning(f"Failed to set bot commands: {e}")
@@ -2075,7 +2086,15 @@ class TelegramBridge:
     async def _cmd_dashboard(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
-        """Открыть Telegram Mini App с дэшбордом."""
+        """Открыть Telegram Mini App с дэшбордом. Только master-агент —
+        единая точка входа в общий fleet-cockpit."""
+        if not self.agent.is_master:
+            await self._reply(
+                update, context,
+                "Дэшборд открывается только у master-агента (единая точка "
+                "входа во флот). Напишите команду основному боту."
+            )
+            return
         url = os.environ.get("MINIAPP_URL", "").strip()
         if not url:
             await self._reply(

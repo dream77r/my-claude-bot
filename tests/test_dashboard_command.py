@@ -7,12 +7,35 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.telegram_bridge import TelegramBridge
+from src.telegram_bridge import BOT_COMMANDS, TelegramBridge, _commands_for
+
+
+def test_commands_for_master_includes_dashboard():
+    names = {c.command for c in _commands_for(is_master=True)}
+    assert "dashboard" in names
+    assert "setup_dashboard" in names
+    assert len(_commands_for(is_master=True)) == len(BOT_COMMANDS)
+
+
+def test_commands_for_non_master_hides_dashboard():
+    names = {c.command for c in _commands_for(is_master=False)}
+    assert "dashboard" not in names
+    assert "setup_dashboard" not in names
+    # Остальные команды остаются — например /help, /status.
+    assert "help" in names
+    assert "status" in names
 
 
 class _Agent:
     name = "me"
     display_name = "Master"
+    is_master = True
+
+
+class _NonMasterAgent:
+    name = "coder"
+    display_name = "Coder"
+    is_master = False
 
 
 @pytest.fixture
@@ -21,6 +44,19 @@ def bridge():
     b.agent = _Agent()
     b._reply = AsyncMock()
     return b
+
+
+@pytest.mark.asyncio
+async def test_non_master_agent_refuses_dashboard():
+    b = TelegramBridge.__new__(TelegramBridge)
+    b.agent = _NonMasterAgent()
+    b._reply = AsyncMock()
+    update, msg = _make_update()
+    await b._cmd_dashboard(update, None, "")
+    b._reply.assert_awaited_once()
+    text = b._reply.await_args.args[2]
+    assert "master" in text.lower()
+    msg.reply_text.assert_not_awaited()
 
 
 def _make_update():
