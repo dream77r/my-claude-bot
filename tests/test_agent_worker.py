@@ -104,51 +104,224 @@ class TestAgentWorker:
         assert worker.cancel_task(999) is False
 
 
-class TestStreamInterruption:
+class TestMidTurnInjection:
     @pytest.mark.asyncio
-    async def test_preempt_cancels_running_task(self, worker):
-        """Активная задача отменяется при поступлении нового сообщения."""
+    async def test_followup_buffered_while_turn_active(self, worker, bus):
+        """Второе сообщение во время turn попадает в pending_followups."""
+        bus.subscribe("telegram:test")
         started = asyncio.Event()
-        cancelled = asyncio.Event()
+        release = asyncio.Event()
 
         async def slow_call(*args, **kwargs):
             started.set()
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-            return "not reached"
+            await release.wait()
+            return "done"
 
         worker.agent.call_claude = AsyncMock(side_effect=slow_call)
 
-        msg = FleetMessage(
+        first = FleetMessage(
             source="telegram:123",
             target="agent:test",
             content="first",
             chat_id=123,
         )
-        task = asyncio.create_task(worker._handle_message(msg))
-        worker._active_tasks[123] = task
+        run_task = asyncio.create_task(worker.run())
+
+        # Отправляем первое — стартует turn
+        await bus.publish(first)
         await started.wait()
-        assert 123 in worker._active_tasks
+        assert worker._has_active_task(123)
 
-        preempted = await worker._preempt_active_task(123)
-        assert preempted is True
-        assert cancelled.is_set()
-        # Identity-check в finally должен был удалить запись сам
-        assert 123 not in worker._active_tasks
+        # Второе сообщение во время turn — должно буферизоваться
+        second = FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="second",
+            chat_id=123,
+        )
+        await bus.publish(second)
+        # Даём run() возможность обработать
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if worker._pending_followups.get(123):
+                break
+
+        assert worker._pending_followups.get(123) == [second]
+        # call_claude был вызван только для первого
+        assert worker.agent.call_claude.call_count == 1
+
+        release.set()
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
 
     @pytest.mark.asyncio
-    async def test_preempt_noop_when_no_active_task(self, worker):
-        assert await worker._preempt_active_task(999) is False
+    async def test_coalesce_multiple_followups(self, worker):
+        """Несколько follow-ups склеиваются в одно сообщение с всеми файлами."""
+        msgs = [
+            FleetMessage(
+                source="telegram:123",
+                target="agent:test",
+                content="first edit",
+                chat_id=123,
+                files=[{"name": "a.txt"}],
+                metadata={"message_thread_id": 10},
+            ),
+            FleetMessage(
+                source="telegram:123",
+                target="agent:test",
+                content="second edit",
+                chat_id=123,
+                metadata={"message_thread_id": 11},
+            ),
+            FleetMessage(
+                source="telegram:123",
+                target="agent:test",
+                content="third edit",
+                chat_id=123,
+                files=[{"name": "b.txt"}],
+                metadata={"message_thread_id": 12},
+            ),
+        ]
+        merged = AgentWorker._coalesce_followups(msgs)
+        assert merged.content == "first edit\n\nsecond edit\n\nthird edit"
+        assert merged.files == [{"name": "a.txt"}, {"name": "b.txt"}]
+        # Последние метаданные доминируют (свежий thread_id)
+        assert merged.metadata["message_thread_id"] == 12
+        assert merged.metadata["coalesced_count"] == 3
+        assert merged.chat_id == 123
 
     @pytest.mark.asyncio
-    async def test_preempt_noop_when_task_done(self, worker):
-        done = asyncio.get_event_loop().create_future()
-        done.set_result(None)
-        worker._active_tasks[123] = done  # type: ignore[assignment]
-        assert await worker._preempt_active_task(123) is False
+    async def test_followup_runs_after_current_turn(self, worker, bus):
+        """Coalesced follow-up становится следующим turn'ом после завершения."""
+        bus.subscribe("telegram:test")
+        calls = []
+        release = [asyncio.Event(), asyncio.Event()]
+        started = [asyncio.Event(), asyncio.Event()]
+
+        async def tracking_call(prompt, *args, **kwargs):
+            idx = len(calls)
+            calls.append(prompt)
+            started[idx].set()
+            await release[idx].wait()
+            return f"reply-{idx}"
+
+        worker.agent.call_claude = AsyncMock(side_effect=tracking_call)
+
+        run_task = asyncio.create_task(worker.run())
+
+        # Первое — блокируется
+        await bus.publish(FleetMessage(
+            source="telegram:123", target="agent:test",
+            content="one", chat_id=123,
+        ))
+        await started[0].wait()
+
+        # Второе — буферится
+        await bus.publish(FleetMessage(
+            source="telegram:123", target="agent:test",
+            content="two", chat_id=123,
+        ))
+        # Даём run() переложить в буфер
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if worker._pending_followups.get(123):
+                break
+        assert worker._pending_followups.get(123)
+
+        # Отпускаем первый turn — должен запуститься второй с буферизованным
+        release[0].set()
+        await started[1].wait()
+        assert calls == ["one", "two"]
+        assert worker._pending_followups.get(123) is None
+
+        release[1].set()
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_cancel_task_drops_pending_followups(self, worker):
+        """/stop не должен запускать буферизованные сообщения после cancel."""
+        task = MagicMock()
+        task.done.return_value = False
+        worker._active_tasks[123] = task
+        worker._pending_followups[123] = [
+            FleetMessage(source="x", target="y", content="buffered", chat_id=123),
+        ]
+
+        assert worker.cancel_task(123) is True
+        assert 123 not in worker._pending_followups
+
+    @pytest.mark.asyncio
+    async def test_agent_to_agent_bypasses_followup_buffer(self, worker, bus):
+        """Делегация (AGENT_TO_AGENT) не должна буферизоваться даже если
+        формально есть активная задача на chat_id (у делегаций chat_id=0)."""
+        bus.subscribe("telegram:test")
+        # Фейковая активная задача на chat_id=0
+        fake = asyncio.create_task(asyncio.sleep(60))
+        worker._active_tasks[0] = fake
+
+        try:
+            # AGENT_TO_AGENT с chat_id=0 — фильтр в run() должен пропустить
+            msg = FleetMessage(
+                source="agent:other",
+                target="agent:test",
+                content="deleg",
+                msg_type=MessageType.AGENT_TO_AGENT,
+                chat_id=0,
+                metadata={"source_role": "master", "delegation_chain": ["other"]},
+            )
+            # Проверяем только условие в run() — chat_id=0 не триггерит
+            # буфер. Упрощённо: смотрим _has_active_task + фильтр.
+            # chat_id=0 falsy → первое условие if msg.chat_id уже False.
+            assert not (
+                msg.chat_id
+                and msg.msg_type != MessageType.AGENT_TO_AGENT
+                and worker._has_active_task(msg.chat_id)
+            )
+        finally:
+            fake.cancel()
+            try:
+                await fake
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_followup_survives_turn_error(self, worker, bus):
+        """Если turn упал с ошибкой — pending follow-ups всё равно публикуются."""
+        bus.subscribe("telegram:test")
+        bus.subscribe("agent:test")
+        worker.agent.call_claude = AsyncMock(side_effect=RuntimeError("boom"))
+
+        # Пред-заряжаем pending followup, эмулируя что он пришёл во время turn
+        followup = FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="next question",
+            chat_id=123,
+        )
+        worker._pending_followups[123] = [followup]
+
+        msg = FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="fail",
+            chat_id=123,
+        )
+        await worker._handle_message(msg)
+
+        # Coalesced follow-up должен оказаться в очереди agent:test
+        delivered = []
+        q = bus._queues["agent:test"]
+        while not q.empty():
+            delivered.append(q.get_nowait())
+
+        assert any(m.content == "next question" for m in delivered)
 
     @pytest.mark.asyncio
     async def test_finally_does_not_evict_successor(self, worker, bus):

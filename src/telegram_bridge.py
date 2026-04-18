@@ -2952,9 +2952,8 @@ class TelegramBridge:
                             clear_outbox(agent_dir)
 
                 elif event == "interrupted":
-                    # Stream interruption: прежняя задача отменена из-за
-                    # нового сообщения. Финализируем статус, сохранив то,
-                    # что пользователь уже видел, с пометкой прерывания.
+                    # Turn был отменён извне (например /stop). Финализируем
+                    # статус с пометкой, что ответ прерван.
                     status = self._status_messages.pop(chat_id, None)
                     if status:
                         partial = status.current_text() or ""
@@ -2962,6 +2961,13 @@ class TelegramBridge:
                             await status.finalize(f"{partial}\n\n_(прервано)_")
                         else:
                             await status.cleanup()
+
+                elif event == "queued_followup":
+                    # Юзер прислал сообщение во время активного turn —
+                    # оно буферизовано и отработает следующим turn'ом.
+                    # Статус-сообщение уже видно, явного ack не шлём,
+                    # чтобы не засорять чат.
+                    pass
 
                 elif event == "error":
                     status = self._status_messages.pop(chat_id, None)

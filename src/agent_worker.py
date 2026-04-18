@@ -25,6 +25,14 @@ class AgentWorker:
 
     Одновременно обрабатывает по одному сообщению на chat_id
     (сериализация через _active набор).
+
+    Mid-turn injection: если юзер пишет второе сообщение, пока агент
+    ещё обрабатывает предыдущее, новое сообщение буферится в
+    `_pending_followups[chat_id]`. По завершении текущего turn все
+    буферизированные сообщения склеиваются в одно и публикуются в ту же
+    bus-очередь — `run()` подхватит их как следующий turn. Это
+    противоположность stream interruption: не теряем контекст ни
+    текущего ответа, ни того, что юзер хотел добавить.
     """
 
     def __init__(
@@ -40,6 +48,8 @@ class AgentWorker:
         self._running = False
         # Активные chat_id → Task (для /stop)
         self._active_tasks: dict[int, asyncio.Task] = {}
+        # Follow-up сообщения, пришедшие пока turn ещё идёт.
+        self._pending_followups: dict[int, list[FleetMessage]] = {}
 
     def cancel_task(self, chat_id: int) -> bool:
         """Отменить активную задачу для chat_id (для /stop)."""
@@ -47,28 +57,11 @@ class AgentWorker:
         if task and not task.done():
             task.cancel()
             self._active_tasks.pop(chat_id, None)
+            # /stop должен ещё и выбросить накопленные follow-ups,
+            # иначе после отмены они снова запустят новый turn.
+            self._pending_followups.pop(chat_id, None)
             return True
         return False
-
-    async def _preempt_active_task(self, chat_id: int) -> bool:
-        """Graceful cancel активной задачи для chat_id (stream interruption).
-
-        Юзер пишет новое сообщение пока предыдущее ещё обрабатывается —
-        предыдущую задачу отменяем, чтобы не держать два стрима и не
-        тратить модель на устаревший запрос. Возвращает True если что-то
-        отменили (вызывающий публикует interrupted-событие).
-        """
-        old = self._active_tasks.get(chat_id)
-        if not old or old.done():
-            return False
-        old.cancel()
-        try:
-            await asyncio.wait_for(old, timeout=2.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
-        except Exception:
-            pass
-        return True
 
     def is_busy(self) -> bool:
         """True если есть незавершённые задачи."""
@@ -91,27 +84,37 @@ class AgentWorker:
         while self._running:
             try:
                 msg = await self.bus.consume(self._queue_name)
-                # Stream interruption: если для этого chat_id уже
-                # обрабатывается задача, отменяем её до старта новой.
-                # Delegation-сообщения (AGENT_TO_AGENT) не трогаем: у них
-                # chat_id=0 и они не конкурируют с пользовательским трафиком.
+                # Mid-turn injection: если для этого chat_id уже идёт
+                # turn, буферируем сообщение вместо старта нового. В
+                # finally _handle_message coalesced follow-ups вернутся
+                # в эту же очередь как единое «следующее» сообщение.
+                # Delegation (AGENT_TO_AGENT) идёт мимо буфера —
+                # у них chat_id=0 и они не конкурируют с юзером.
                 if (
                     msg.chat_id
                     and msg.msg_type != MessageType.AGENT_TO_AGENT
-                    and await self._preempt_active_task(msg.chat_id)
+                    and self._has_active_task(msg.chat_id)
                 ):
+                    self._pending_followups.setdefault(
+                        msg.chat_id, []
+                    ).append(msg)
+                    logger.info(
+                        f"Mid-turn: буферизую follow-up для chat={msg.chat_id} "
+                        f"(очередь={len(self._pending_followups[msg.chat_id])})"
+                    )
                     thread_id = msg.metadata.get("message_thread_id")
-                    interrupt_meta = {"event": "interrupted"}
+                    queued_meta = {"event": "queued_followup"}
                     if thread_id:
-                        interrupt_meta["message_thread_id"] = thread_id
+                        queued_meta["message_thread_id"] = thread_id
                     await self.bus.publish(FleetMessage(
                         source=f"agent:{self.agent.name}",
                         target=f"telegram:{self.agent.name}",
                         content="",
                         msg_type=MessageType.SYSTEM,
                         chat_id=msg.chat_id,
-                        metadata=interrupt_meta,
+                        metadata=queued_meta,
                     ))
+                    continue
                 # Обработать в отдельной задаче (не блокируем очередь)
                 task = asyncio.create_task(self._handle_message(msg))
                 if msg.chat_id:
@@ -123,6 +126,38 @@ class AgentWorker:
                 logger.error(f"AgentWorker '{self.agent.name}' error: {e}")
 
         self._running = False
+
+    def _has_active_task(self, chat_id: int) -> bool:
+        task = self._active_tasks.get(chat_id)
+        return task is not None and not task.done()
+
+    @staticmethod
+    def _coalesce_followups(msgs: list[FleetMessage]) -> FleetMessage:
+        """Склеить буферизированные follow-ups в одно сообщение.
+
+        - content: `\\n\\n`-joined non-empty parts в исходном порядке.
+        - files: объединённый список (ничего не теряем).
+        - metadata: от последнего сообщения (свежие thread_id,
+          group_chat_id, etc), плюс `coalesced_count`.
+        """
+        contents = [m.content for m in msgs if m.content]
+        merged_content = "\n\n".join(contents)
+        merged_files: list = []
+        for m in msgs:
+            if m.files:
+                merged_files.extend(m.files)
+        last = msgs[-1]
+        metadata = dict(last.metadata) if last.metadata else {}
+        metadata["coalesced_count"] = len(msgs)
+        return FleetMessage(
+            source=last.source,
+            target=last.target,
+            content=merged_content,
+            msg_type=last.msg_type,
+            chat_id=last.chat_id,
+            files=merged_files or None,
+            metadata=metadata,
+        )
 
     async def _handle_message(self, msg: FleetMessage) -> None:
         """Обработать одно входящее сообщение."""
@@ -231,6 +266,27 @@ class AgentWorker:
             current = asyncio.current_task()
             if chat_id and self._active_tasks.get(chat_id) is current:
                 self._active_tasks.pop(chat_id, None)
+
+            # Mid-turn injection: если во время turn накопились follow-ups,
+            # склеиваем и публикуем их как следующее сообщение для run().
+            # ВАЖНО: pop из _active_tasks уже произошёл выше, так что
+            # `run()` возьмёт merged сообщение в новую задачу, а не
+            # положит снова в буфер.
+            if chat_id:
+                followups = self._pending_followups.pop(chat_id, None)
+                if followups:
+                    merged = self._coalesce_followups(followups)
+                    logger.info(
+                        f"Mid-turn: публикую coalesced follow-up для "
+                        f"chat={chat_id} ({len(followups)} сообщений, "
+                        f"{len(merged.content)} символов)"
+                    )
+                    try:
+                        await self.bus.publish(merged)
+                    except Exception as e:
+                        logger.error(
+                            f"Mid-turn publish failed chat={chat_id}: {e}"
+                        )
 
     async def _handle_delegation(self, msg: FleetMessage) -> None:
         """Обработать делегированное сообщение от другого агента."""
