@@ -893,16 +893,16 @@ class Agent:
         # Модель: settings override → agent.yaml default (per-user)
         active_model = memory.get_setting(effective_dir, "claude_model") or self.claude_model
 
-        # CLI hooks для Claude Code
+        # CLI hooks для Claude Code.
+        # PreCompact делает git-снапшот memory перед сжатием, чтобы правки
+        # wiki/profile в текущем цикле не потерялись, если сжатый контекст
+        # не сохранит намерение.
+        precompact_script = Path(__file__).parent / "precompact_hook.py"
         cli_hooks = {
             "PreCompact": [
                 {
                     "type": "command",
-                    "command": (
-                        f'echo "\\n## Компакт сессии $(date +%H:%M)\\n'
-                        f'Контекст сжат. Ключевая информация сохранена в profile.md и wiki/." '
-                        f'>> {memory_path.resolve()}/daily/$(date +%Y-%m-%d).md'
-                    ),
+                    "command": f'{sys.executable} "{precompact_script}" "{memory_path.resolve()}"',
                 }
             ],
         }
