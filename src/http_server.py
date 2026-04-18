@@ -16,11 +16,15 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+from pathlib import Path as _Path
+
 from fastapi import Depends, FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from .a2a.cards import build_router as _a2a_cards_router
 from .a2a.server import build_router as _a2a_server_router
 from .miniapp.auth import AuthenticatedUser, get_current_user
+from .miniapp.cockpit import build_router as _miniapp_cockpit_router
 from .miniapp.routes import build_router as _miniapp_router
 
 if TYPE_CHECKING:
@@ -76,11 +80,38 @@ def create_app(
         }
 
     app.include_router(_miniapp_router())
+    app.include_router(_miniapp_cockpit_router())
     app.include_router(_a2a_cards_router())
     if bus is not None:
         app.include_router(_a2a_server_router(bus))
 
+    # Статика Mini App — `/miniapp/index.html` + /miniapp/assets/*.
+    # Ищем в двух местах: рядом с репо (dev) или в env MINIAPP_DIR.
+    miniapp_dir = _resolve_miniapp_dir()
+    if miniapp_dir is not None:
+        app.mount(
+            "/miniapp",
+            StaticFiles(directory=str(miniapp_dir), html=True),
+            name="miniapp",
+        )
+        logger.info("Mini App static serve: %s", miniapp_dir)
+
     return app
+
+
+def _resolve_miniapp_dir() -> "_Path | None":
+    env = os.environ.get("MINIAPP_DIR", "").strip()
+    if env:
+        p = _Path(env)
+        if p.is_dir() and (p / "index.html").exists():
+            return p
+        logger.warning("MINIAPP_DIR=%s invalid (нет index.html)", env)
+        return None
+    # Автопоиск: parent of src/ → miniapp/
+    candidate = _Path(__file__).resolve().parent.parent / "miniapp"
+    if candidate.is_dir() and (candidate / "index.html").exists():
+        return candidate
+    return None
 
 
 async def serve_forever(runtime: "FleetRuntime") -> None:

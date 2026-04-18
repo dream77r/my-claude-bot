@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Cockpit · my-claude-bot</title>
+    <link rel="stylesheet" href="/miniapp/assets/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <header class="hdr">
+      <div class="hdr-title">
+        <span class="dot" id="conn-dot" aria-hidden="true"></span>
+        <h1>Cockpit</h1>
+      </div>
+      <button id="refresh" class="btn-icon" aria-label="Обновить">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 2v6h-6"></path>
+          <path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
+          <path d="M3 22v-6h6"></path>
+          <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
+        </svg>
+      </button>
+    </header>
+
+    <main id="app">
+      <section class="stats" aria-label="Метрики дня">
+        <div class="stats-tile">
+          <div class="stats-label">Вызовов</div>
+          <div class="stats-value" data-stat="total_calls">—</div>
+        </div>
+        <div class="stats-tile">
+          <div class="stats-label">Ошибок</div>
+          <div class="stats-value" data-stat="errors">—</div>
+        </div>
+        <div class="stats-tile">
+          <div class="stats-label">Tool calls</div>
+          <div class="stats-value" data-stat="tool_calls">—</div>
+        </div>
+        <div class="stats-tile">
+          <div class="stats-label">Latency ~</div>
+          <div class="stats-value" data-stat="avg_latency">—</div>
+        </div>
+      </section>
+
+      <section aria-label="Агенты">
+        <h2 class="section-title">Агенты</h2>
+        <div class="agents" id="agents"></div>
+      </section>
+
+      <section aria-label="Активность">
+        <h2 class="section-title">Последнее</h2>
+        <ul class="feed" id="feed"></ul>
+      </section>
+
+      <p id="err" class="err hidden" role="alert"></p>
+    </main>
+
+    <footer class="ftr">
+      <span id="last-updated">…</span>
+    </footer>
+
+    <script type="module" src="/miniapp/assets/app.js"></script>
+  </body>
+</html>

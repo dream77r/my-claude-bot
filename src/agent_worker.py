@@ -50,6 +50,19 @@ class AgentWorker:
             return True
         return False
 
+    def is_busy(self) -> bool:
+        """True если есть незавершённые задачи."""
+        return any(not t.done() for t in self._active_tasks.values())
+
+    def active_info(self) -> list[dict]:
+        """Снимок активных задач для cockpit API."""
+        out = []
+        for chat_id, task in self._active_tasks.items():
+            if task.done():
+                continue
+            out.append({"chat_id": chat_id, "name": task.get_name()})
+        return out
+
     async def run(self) -> None:
         """Основной цикл: читать из bus, обрабатывать, отвечать."""
         self._running = True

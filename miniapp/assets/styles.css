@@ -1,0 +1,279 @@
+/* Cockpit v1 — mobile-first, использует Telegram theme-vars когда доступны.
+   Fallback палитра для браузера без Telegram. */
+
+:root {
+  --bg: var(--tg-theme-bg-color, #f4f4f5);
+  --sec: var(--tg-theme-secondary-bg-color, #ffffff);
+  --text: var(--tg-theme-text-color, #111);
+  --hint: var(--tg-theme-hint-color, #707579);
+  --link: var(--tg-theme-link-color, #2481cc);
+  --btn: var(--tg-theme-button-color, #2481cc);
+  --btn-text: var(--tg-theme-button-text-color, #fff);
+  --border: rgba(0, 0, 0, 0.08);
+
+  --ok: #22c55e;
+  --warn: #eab308;
+  --err: #ef4444;
+
+  --radius: 12px;
+  --gap: 12px;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --border: rgba(255, 255, 255, 0.08);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 16px 8px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 10;
+}
+.hdr-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hdr h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--hint);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--hint) 25%, transparent);
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.dot.ok   { background: var(--ok);   box-shadow: 0 0 0 3px color-mix(in oklch, var(--ok) 25%, transparent); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in oklch, var(--warn) 25%, transparent); }
+.dot.err  { background: var(--err);  box-shadow: 0 0 0 3px color-mix(in oklch, var(--err) 25%, transparent); }
+
+.btn-icon {
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--sec);
+  color: var(--text);
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+.btn-icon:active { transform: scale(0.92); }
+.btn-icon.spinning svg { animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+main {
+  padding: 8px 16px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.section-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--gap);
+}
+.stats-tile {
+  background: var(--sec);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 10px;
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.stats-label {
+  font-size: 11px;
+  color: var(--hint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.stats-value {
+  font-size: 22px;
+  font-weight: 600;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agents {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--gap);
+}
+.agent {
+  background: var(--sec);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  box-shadow: var(--shadow);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: transform 0.15s;
+}
+.agent:active { transform: scale(0.98); }
+.agent-avatar {
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--btn) 15%, transparent);
+  color: var(--btn);
+  display: grid; place-items: center;
+  font-weight: 700;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.agent-body { flex: 1; min-width: 0; }
+.agent-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-name .dot { width: 8px; height: 8px; }
+.agent-sub {
+  color: var(--hint);
+  font-size: 13px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--hint) 15%, transparent);
+  color: var(--hint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.badge.busy {
+  background: color-mix(in oklch, var(--warn) 20%, transparent);
+  color: var(--warn);
+}
+.badge.idle {
+  background: color-mix(in oklch, var(--ok) 20%, transparent);
+  color: var(--ok);
+}
+.badge.master {
+  background: color-mix(in oklch, var(--link) 15%, transparent);
+  color: var(--link);
+}
+
+.feed {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  background: var(--sec);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.feed-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.feed-item:last-child { border-bottom: 0; }
+.feed-meta {
+  font-size: 11px;
+  color: var(--hint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.feed-agent {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in oklch, var(--link) 15%, transparent);
+  color: var(--link);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.feed-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feed-text.assistant { color: var(--hint); }
+
+.ftr {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  padding: 8px 16px calc(8px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--hint);
+  font-size: 11px;
+  text-align: center;
+  border-top: 1px solid var(--border);
+}
+
+.hidden { display: none !important; }
+.err {
+  background: color-mix(in oklch, var(--err) 15%, transparent);
+  color: var(--err);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin: 0;
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklch, var(--hint) 10%, transparent),
+    color-mix(in oklch, var(--hint) 18%, transparent),
+    color-mix(in oklch, var(--hint) 10%, transparent)
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+  border-radius: 6px;
+  color: transparent;
+}
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+@media (min-width: 480px) {
+  .agents { grid-template-columns: repeat(2, 1fr); }
+}
