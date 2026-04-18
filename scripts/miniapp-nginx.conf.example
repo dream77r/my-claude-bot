@@ -1,0 +1,49 @@
+# Пример nginx-конфига для Mini App + A2A.
+#
+# Использование:
+#   1. Скопируй на сервер:
+#        sudo cp scripts/miniapp-nginx.conf.example \
+#                /etc/nginx/sites-available/<your-domain>
+#   2. Замени YOUR_DOMAIN и YOUR_HTTP_PORT на свои значения:
+#        sudo sed -i 's/YOUR_DOMAIN/bot.example.com/g; s/YOUR_HTTP_PORT/8089/g' \
+#                 /etc/nginx/sites-available/<your-domain>
+#   3. Активируй:
+#        sudo ln -s /etc/nginx/sites-available/<your-domain> \
+#                   /etc/nginx/sites-enabled/
+#   4. Проверь синтаксис и перезапусти nginx:
+#        sudo nginx -t && sudo systemctl reload nginx
+#   5. Выпусти HTTPS-сертификат (Let's Encrypt):
+#        sudo certbot --nginx -d <your-domain> --redirect
+#      certbot сам добавит ssl_certificate / 443-блок / 80→443 редирект.
+#   6. Заполни в .env:
+#        HTTP_PORT=<your-http-port>
+#        PUBLIC_BASE_URL=https://<your-domain>
+#        MINIAPP_URL=https://<your-domain>/miniapp/
+#   7. Перезапусти бота.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name YOUR_DOMAIN;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # SSE / streaming ready (для будущих push-обновлений Mini App)
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 86400s;
+    proxy_set_header Connection '';
+    chunked_transfer_encoding on;
+    client_max_body_size 10M;
+
+    location / {
+        proxy_pass http://127.0.0.1:YOUR_HTTP_PORT;
+    }
+
+    # certbot --nginx добавит ниже: listen 443 ssl, ssl_certificate*,
+    # + отдельный server-блок с 80→443 редиректом.
+}
