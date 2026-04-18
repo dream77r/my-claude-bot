@@ -29,6 +29,32 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || {
     exit 1
 }
 
+# Идемпотентность: если предыдущий запуск bootstrap'а умер на `git pull`,
+# у нас в списке остался его stash. Вернём ВСЁ, что лежит в stash'ах
+# с нашим маркером, чтобы сейчас застешить разом полное working tree.
+OLD_STASHES=$(git stash list | grep -E "pre-overlay-bootstrap-" | cut -d: -f1 || true)
+if [ -n "$OLD_STASHES" ]; then
+    echo -e "${BOLD}→ Восстанавливаю stash'и от прошлой попытки...${RESET}"
+    # Идём в обратном порядке (снизу) — так индексы не съезжают.
+    echo "$OLD_STASHES" | tac | while read -r s; do
+        # Конфликтов тут быть не должно — working tree пересекается только с
+        # собственным старым stash'ем (с тех пор никто не pull'ил). Если
+        # вдруг — переписываем из stash'а, чтобы не потерять правки.
+        if ! git stash pop "$s" >/dev/null 2>&1; then
+            CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null)
+            if [ -n "$CONFLICTS" ]; then
+                echo "$CONFLICTS" | while read -r f; do
+                    git checkout "$s" -- "$f" 2>/dev/null || true
+                done
+                git reset HEAD -- $CONFLICTS >/dev/null 2>&1 || true
+            fi
+            git stash drop "$s" >/dev/null 2>&1 || true
+        fi
+    done
+    echo -e "${GREEN}  ✓ прошлые stash'и вмержены${RESET}"
+    echo ""
+fi
+
 echo -e "${BOLD}→ Stash локальных правок (весь working tree)...${RESET}"
 # Стешим ВСЁ, не только agents/ — у юзеров бывают правки в src/, update.sh
 # и т.п., которые тоже блокируют git pull. Конфликты при pop разрешаем в
