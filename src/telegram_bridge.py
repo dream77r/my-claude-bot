@@ -48,6 +48,7 @@ from .formatter import (
     split_message,
 )
 from .i18n import t
+from .telegram_retry import tg_retry
 from .status_message import (
     EDIT_MIN_INTERVAL,
     STREAM_EDIT_INTERVAL,
@@ -173,21 +174,27 @@ async def send_long_message(
         for part in parts:
             formatted, pm = format_for_telegram(part)
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=formatted,
-                    parse_mode=pm,
-                    message_thread_id=message_thread_id,
+                await tg_retry(
+                    lambda: context.bot.send_message(
+                        chat_id=chat_id,
+                        text=formatted,
+                        parse_mode=pm,
+                        message_thread_id=message_thread_id,
+                    ),
+                    op="send_long_message",
                 )
             except Exception as _e:
                 logger.warning(
                     f"send_long_message: HTML parse failed ({_e}), fallback to plain text\n"
                     f"HTML preview: {formatted[:300]!r}"
                 )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=part,
-                    message_thread_id=message_thread_id,
+                await tg_retry(
+                    lambda: context.bot.send_message(
+                        chat_id=chat_id,
+                        text=part,
+                        message_thread_id=message_thread_id,
+                    ),
+                    op="send_long_message.fallback",
                 )
             if len(parts) > 1:
                 await asyncio.sleep(0.3)
@@ -196,11 +203,14 @@ async def send_long_message(
     parts = split_message(text)
     for part in parts:
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=part,
-                parse_mode=parse_mode,
-                message_thread_id=message_thread_id,
+            await tg_retry(
+                lambda: context.bot.send_message(
+                    chat_id=chat_id,
+                    text=part,
+                    parse_mode=parse_mode,
+                    message_thread_id=message_thread_id,
+                ),
+                op="send_long_message",
             )
         except Exception as _e:
             if parse_mode:
@@ -208,10 +218,13 @@ async def send_long_message(
                     f"send_long_message: HTML parse failed ({_e}), fallback to plain text\n"
                     f"HTML preview: {part[:300]!r}"
                 )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=part,
-                    message_thread_id=message_thread_id,
+                await tg_retry(
+                    lambda: context.bot.send_message(
+                        chat_id=chat_id,
+                        text=part,
+                        message_thread_id=message_thread_id,
+                    ),
+                    op="send_long_message.fallback",
                 )
         if len(parts) > 1:
             await asyncio.sleep(0.3)
@@ -787,12 +800,18 @@ class TelegramBridge:
         """Универсальный ответ: работает и из команды, и из callback-кнопки."""
         chat_id = update.effective_chat.id
         if update.message:
-            await update.message.reply_text(
-                text, reply_markup=reply_markup
+            await tg_retry(
+                lambda: update.message.reply_text(
+                    text, reply_markup=reply_markup
+                ),
+                op="reply.message",
             )
         else:
-            await context.bot.send_message(
-                chat_id=chat_id, text=text, reply_markup=reply_markup
+            await tg_retry(
+                lambda: context.bot.send_message(
+                    chat_id=chat_id, text=text, reply_markup=reply_markup
+                ),
+                op="reply.callback",
             )
 
     async def _cmd_newsession(
@@ -3036,11 +3055,14 @@ class TelegramBridge:
         for part in parts:
             formatted_part, parse_mode = format_for_telegram(part)
             try:
-                await app.bot.send_message(
-                    chat_id=chat_id,
-                    text=formatted_part,
-                    parse_mode=parse_mode,
-                    message_thread_id=message_thread_id,
+                await tg_retry(
+                    lambda: app.bot.send_message(
+                        chat_id=chat_id,
+                        text=formatted_part,
+                        parse_mode=parse_mode,
+                        message_thread_id=message_thread_id,
+                    ),
+                    op="send_via_bot",
                 )
             except Exception as e:
                 if parse_mode:
@@ -3049,10 +3071,13 @@ class TelegramBridge:
                         f"HTML preview: {formatted_part[:300]!r}"
                     )
                     try:
-                        await app.bot.send_message(
-                            chat_id=chat_id,
-                            text=part,
-                            message_thread_id=message_thread_id,
+                        await tg_retry(
+                            lambda: app.bot.send_message(
+                                chat_id=chat_id,
+                                text=part,
+                                message_thread_id=message_thread_id,
+                            ),
+                            op="send_via_bot.fallback",
                         )
                     except Exception as e2:
                         logger.error(f"Send error to {chat_id}: {e2}")

@@ -9,6 +9,7 @@ import time
 from telegram.constants import ChatAction
 
 from .formatter import TG_MESSAGE_LIMIT, format_for_telegram
+from .telegram_retry import tg_retry
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +98,14 @@ class StatusMessage:
                 return False
 
             try:
-                await self.context.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=self.message_id,
-                    text=formatted_text,
-                    parse_mode=fmt_parse_mode,
+                await tg_retry(
+                    lambda: self.context.bot.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=self.message_id,
+                        text=formatted_text,
+                        parse_mode=fmt_parse_mode,
+                    ),
+                    op="status.finalize.edit",
                 )
                 self.message_id = None  # Больше не управляем этим сообщением
                 return True
@@ -113,10 +117,13 @@ class StatusMessage:
                 # Если HTML не парсится — попробовать plain text
                 if fmt_parse_mode:
                     try:
-                        await self.context.bot.edit_message_text(
-                            chat_id=self.chat_id,
-                            message_id=self.message_id,
-                            text=text,
+                        await tg_retry(
+                            lambda: self.context.bot.edit_message_text(
+                                chat_id=self.chat_id,
+                                message_id=self.message_id,
+                                text=text,
+                            ),
+                            op="status.finalize.edit.plain",
                         )
                         self.message_id = None
                         return True
