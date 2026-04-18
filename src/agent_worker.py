@@ -230,6 +230,29 @@ class AgentWorker:
             f"от '{source_agent}'"
         )
 
+        # chat_id для уведомлений пользователю:
+        # берём из метаданных или fallback на первого allowed_user агента
+        notify_chat_id = (
+            msg.metadata.get("notify_chat_id")
+            or (self.agent.allowed_users[0] if self.agent.allowed_users else 0)
+        )
+
+        # Уведомить пользователя что задача принята
+        if notify_chat_id:
+            task_preview = msg.content
+            # Убрать префикс "[Делегация от X]: " для читаемости
+            if task_preview.startswith("[Делегация от "):
+                task_preview = task_preview.split("]: ", 1)[-1]
+            preview = task_preview[:300] + "..." if len(task_preview) > 300 else task_preview
+            await self.bus.publish(FleetMessage(
+                source=f"agent:{self.agent.name}",
+                target=f"telegram:{self.agent.name}",
+                content=f"📋 Взял задачу от {source_agent}:\n\n{preview}",
+                msg_type=MessageType.OUTBOUND,
+                chat_id=notify_chat_id,
+                metadata={"event": "response"},
+            ))
+
         try:
             async with self.semaphore:
                 response = await asyncio.wait_for(
@@ -237,13 +260,24 @@ class AgentWorker:
                     timeout=DELEGATION_TIMEOUT,
                 )
         except asyncio.TimeoutError:
-            response = "Таймаут обработки делегированной задачи."
+            response = f"⚠️ Таймаут: задача от {source_agent} не выполнена за {DELEGATION_TIMEOUT}с."
             logger.warning(
                 f"Делегация таймаут: '{self.agent.name}' не успел ответить"
             )
         except Exception as e:
-            response = f"Ошибка обработки: {e}"
+            response = f"❌ Ошибка выполнения задачи от {source_agent}: {e}"
             logger.error(f"Делегация ошибка в '{self.agent.name}': {e}")
+
+        # Уведомить пользователя с результатом
+        if notify_chat_id:
+            await self.bus.publish(FleetMessage(
+                source=f"agent:{self.agent.name}",
+                target=f"telegram:{self.agent.name}",
+                content=response,
+                msg_type=MessageType.OUTBOUND,
+                chat_id=notify_chat_id,
+                metadata={"event": "response"},
+            ))
 
         # Отправить ответ обратно через reply_to очередь
         if reply_to:

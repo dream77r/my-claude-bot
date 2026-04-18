@@ -262,48 +262,87 @@ def format_for_telegram(text: str) -> tuple[str, str | None]:
 def split_message(text: str, limit: int = TG_MESSAGE_LIMIT) -> list[str]:
     """
     Разбить длинное сообщение на части с маркером "(n/m)".
-    Разбивает по параграфам, потом по строкам, потом жёстко по limit.
+    Никогда не разбивает внутри ``` блоков кода.
+    Разбивает обычный текст по параграфам, строкам, потом жёстко.
     """
     if len(text) <= limit:
         return [text]
 
-    parts = []
-    remaining = text
+    # Место для маркера "(nn/mm)\n"
+    effective_limit = limit - 10
 
-    while remaining:
-        if len(remaining) <= limit:
-            parts.append(remaining)
-            break
+    CODE_BLOCK_RE = re.compile(
+        r"(```(?:[^\n`]*)?\n[\s\S]*?```|```[\s\S]*?```)"
+    )
+    # Нечётные сегменты — блоки кода (нельзя разбивать)
+    segments = CODE_BLOCK_RE.split(text)
 
-        # Оставить место для маркера "(nn/mm)\n"
-        effective_limit = limit - 10
+    def _flush_text(buf: str) -> list[str]:
+        """Разбить обычный текст на куски ≤ effective_limit."""
+        result = []
+        remaining = buf
+        while len(remaining) > effective_limit:
+            cut = remaining.rfind("\n\n", 0, effective_limit)
+            if cut > effective_limit // 3:
+                result.append(remaining[:cut].rstrip())
+                remaining = remaining[cut + 2:]
+                continue
+            cut = remaining.rfind("\n", 0, effective_limit)
+            if cut > effective_limit // 3:
+                result.append(remaining[:cut].rstrip())
+                remaining = remaining[cut + 1:]
+                continue
+            cut = remaining.rfind(" ", 0, effective_limit)
+            if cut > effective_limit // 3:
+                result.append(remaining[:cut].rstrip())
+                remaining = remaining[cut + 1:]
+                continue
+            result.append(remaining[:effective_limit])
+            remaining = remaining[effective_limit:]
+        if remaining.strip():
+            result.append(remaining)
+        return result
 
-        # Попробовать разбить по двойному переносу строки (параграф)
-        cut_pos = remaining.rfind("\n\n", 0, effective_limit)
-        if cut_pos > effective_limit // 3:
-            parts.append(remaining[:cut_pos])
-            remaining = remaining[cut_pos + 2:]
-            continue
+    parts: list[str] = []
+    current = ""
 
-        # Попробовать по одинарному переносу
-        cut_pos = remaining.rfind("\n", 0, effective_limit)
-        if cut_pos > effective_limit // 3:
-            parts.append(remaining[:cut_pos])
-            remaining = remaining[cut_pos + 1:]
-            continue
+    for i, segment in enumerate(segments):
+        is_code = i % 2 == 1
 
-        # Жёсткая обрезка по пробелу
-        cut_pos = remaining.rfind(" ", 0, effective_limit)
-        if cut_pos > effective_limit // 3:
-            parts.append(remaining[:cut_pos])
-            remaining = remaining[cut_pos + 1:]
-            continue
+        if is_code:
+            if len(current) + len(segment) <= effective_limit:
+                current += segment
+            else:
+                # Сброс текстового буфера
+                flushed = _flush_text(current)
+                if len(flushed) > 1:
+                    parts.extend(flushed[:-1])
+                    current = flushed[-1]
+                elif flushed:
+                    current = flushed[0]
+                # Добавить блок кода
+                if len(current) + len(segment) <= effective_limit:
+                    current += segment
+                else:
+                    if current.strip():
+                        parts.append(current.rstrip())
+                    # Блок кода превышает лимит — отправить целиком
+                    if len(segment) > effective_limit:
+                        parts.append(segment)
+                        current = ""
+                    else:
+                        current = segment
+        else:
+            current += segment
 
-        # Совсем жёсткая обрезка
-        parts.append(remaining[:effective_limit])
-        remaining = remaining[effective_limit:]
+    if current.strip():
+        flushed = _flush_text(current)
+        parts.extend(flushed)
 
-    # Добавить маркеры если больше одной части
+    parts = [p for p in parts if p.strip()]
+    if not parts:
+        return [text]
+
     if len(parts) > 1:
         total = len(parts)
         parts = [f"({i + 1}/{total})\n{part}" for i, part in enumerate(parts)]
@@ -321,14 +360,37 @@ async def send_long_message(
 ) -> None:
     """Отправить сообщение, разбив на части если нужно.
 
-    Если auto_format=True (по умолчанию), автоматически конвертирует
-    Markdown в HTML для Telegram-форматирования.
+    Если auto_format=True, сначала разбивает raw markdown (не ломая блоки кода),
+    затем форматирует каждую часть в HTML отдельно.
     """
     if auto_format and parse_mode is None:
-        text, parse_mode = format_for_telegram(text)
+        # Сначала режем raw markdown (блоки кода никогда не разрезаются),
+        # потом форматируем каждую часть отдельно
+        parts = split_message(text)
+        for part in parts:
+            formatted, pm = format_for_telegram(part)
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=formatted,
+                    parse_mode=pm,
+                    message_thread_id=message_thread_id,
+                )
+            except Exception as _e:
+                logger.warning(
+                    f"send_long_message: HTML parse failed ({_e}), fallback to plain text\n"
+                    f"HTML preview: {formatted[:300]!r}"
+                )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=part,
+                    message_thread_id=message_thread_id,
+                )
+            if len(parts) > 1:
+                await asyncio.sleep(0.3)
+        return
 
     parts = split_message(text)
-
     for part in parts:
         try:
             await context.bot.send_message(
@@ -338,7 +400,6 @@ async def send_long_message(
                 message_thread_id=message_thread_id,
             )
         except Exception as _e:
-            # Если HTML не парсится — отправить plain text
             if parse_mode:
                 logger.warning(
                     f"send_long_message: HTML parse failed ({_e}), fallback to plain text\n"
@@ -349,7 +410,6 @@ async def send_long_message(
                     text=part,
                     message_thread_id=message_thread_id,
                 )
-        # Небольшая пауза между частями
         if len(parts) > 1:
             await asyncio.sleep(0.3)
 
@@ -415,9 +475,9 @@ class StatusMessage:
         if len(text) <= TG_MESSAGE_LIMIT:
             formatted_text, fmt_parse_mode = format_for_telegram(text)
 
-            # Если ответ содержит блок кода с языком — удалить статус и отправить
+            # Если ответ содержит блок кода — удалить статус и отправить
             # новым сообщением, иначе Telegram не показывает кнопку Copy Code на edit.
-            has_code_block = fmt_parse_mode and '<pre><code class="language-' in formatted_text
+            has_code_block = fmt_parse_mode and "<pre><code" in formatted_text
             if has_code_block:
                 await self.cleanup()
                 return False
@@ -3198,30 +3258,29 @@ class TelegramBridge:
         message_thread_id: int | None = None,
     ) -> None:
         """Отправить сообщение через бота (из bus listener)."""
-        formatted_text, parse_mode = format_for_telegram(text)
-        parts = split_message(formatted_text)
+        # Сначала делим raw markdown (блоки кода не разрезаются),
+        # потом форматируем каждую часть отдельно — чтобы <pre><code>
+        # попадал в send_message целым и Telegram показывал кнопку Copy.
+        parts = split_message(text)
         for part in parts:
+            formatted_part, parse_mode = format_for_telegram(part)
             try:
                 await app.bot.send_message(
                     chat_id=chat_id,
-                    text=part,
+                    text=formatted_part,
                     parse_mode=parse_mode,
                     message_thread_id=message_thread_id,
                 )
             except Exception as e:
-                # Если HTML не парсится — отправить plain text
                 if parse_mode:
                     logger.warning(
                         f"HTML send failed for chat {chat_id}: {e}\n"
-                        f"HTML preview: {part[:300]!r}"
+                        f"HTML preview: {formatted_part[:300]!r}"
                     )
                     try:
-                        plain_parts = split_message(text)
-                        idx = parts.index(part)
-                        plain_part = plain_parts[idx] if idx < len(plain_parts) else part
                         await app.bot.send_message(
                             chat_id=chat_id,
-                            text=plain_part,
+                            text=part,
                             message_thread_id=message_thread_id,
                         )
                     except Exception as e2:

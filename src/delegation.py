@@ -20,7 +20,7 @@ from .bus import FleetBus, FleetMessage, MessageType
 logger = logging.getLogger(__name__)
 
 # Таймаут ожидания ответа от делегированного агента
-DELEGATION_TIMEOUT = 120
+DELEGATION_TIMEOUT = 600
 
 
 class DelegationManager:
