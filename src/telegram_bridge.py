@@ -167,6 +167,98 @@ def escape_markdown_v2(text: str) -> str:
     return text
 
 
+def markdown_to_html(text: str) -> str:
+    """Конвертировать Claude Markdown в Telegram HTML-форматирование.
+
+    Поддерживает:
+    - Блоки кода с подсветкой синтаксиса (```lang\\ncode```) → <pre><code>
+    - Inline-код (`code`) → <code>
+    - Жирный (**text** и __text__) → <b>
+    - Курсив (_text_) → <i>
+    - Зачёркнутый (~~text~~) → <s>
+    - Заголовки (# text) → <b>
+    - Ссылки ([text](url)) → <a href>
+    """
+    import html as _html
+
+    result = []
+
+    # Шаг 1: разбить на блоки кода и обычный текст
+    # Паттерн: ```lang\n...\n``` или просто ```\n...\n```
+    parts = re.split(r"(```(?:[^\n`]*)?\n[\s\S]*?```|```[\s\S]*?```)", text)
+
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            # Блок кода — определить язык
+            m = re.match(r"```([^\n`]*)\n([\s\S]*?)```", part)
+            if m:
+                lang = m.group(1).strip()
+                code = _html.escape(m.group(2).rstrip("\n"))
+                if lang:
+                    result.append(f'<pre><code class="language-{lang}">{code}</code></pre>')
+                else:
+                    result.append(f"<pre><code>{code}</code></pre>")
+            else:
+                # Блок без языка и без новой строки
+                inner = re.sub(r"^```|```$", "", part).strip()
+                result.append(f"<pre><code>{_html.escape(inner)}</code></pre>")
+            continue
+
+        # Шаг 2: разбить на inline-код и обычный текст
+        subparts = re.split(r"(`[^`\n]+`)", part)
+        for j, subpart in enumerate(subparts):
+            if j % 2 == 1:
+                # Inline-код
+                code = _html.escape(subpart[1:-1])
+                result.append(f"<code>{code}</code>")
+                continue
+
+            # Шаг 3: обычный текст — экранировать HTML, затем применить форматирование
+            s = _html.escape(subpart)
+
+            # Заголовки (# text) — до остального, чтобы не ломать ссылки
+            s = re.sub(r"^#{1,6} (.+)$", r"<b>\1</b>", s, flags=re.MULTILINE)
+
+            # Жирный **text** и __text__
+            s = re.sub(r"\*\*([\s\S]+?)\*\*", r"<b>\1</b>", s)
+            s = re.sub(r"__([\s\S]+?)__", r"<b>\1</b>", s)
+
+            # Зачёркнутый ~~text~~
+            s = re.sub(r"~~([\s\S]+?)~~", r"<s>\1</s>", s)
+
+            # Курсив _text_ (не внутри слова: no_match_here)
+            s = re.sub(r"(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])", r"<i>\1</i>", s)
+
+            # Ссылки [text](url) — html.escape уже экранировал & в url как &amp;, это ок
+            s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', s)
+
+            result.append(s)
+
+    return "".join(result)
+
+
+def format_for_telegram(text: str) -> tuple[str, str | None]:
+    """Конвертировать ответ агента в HTML для Telegram.
+
+    Returns:
+        (formatted_text, parse_mode) — parse_mode=None если конвертация не нужна
+    """
+    # Если в тексте нет markdown-разметки — отправить как plain text
+    has_markdown = bool(re.search(
+        r"```|`[^`]|\*\*|__|\[.+\]\(.+\)|^#{1,6} |~~",
+        text,
+        re.MULTILINE,
+    ))
+    if not has_markdown:
+        return text, None
+    try:
+        html = markdown_to_html(text)
+        return html, ParseMode.HTML
+    except Exception as e:
+        logger.warning(f"format_for_telegram: markdown→HTML failed: {e}")
+        return text, None
+
+
 def split_message(text: str, limit: int = TG_MESSAGE_LIMIT) -> list[str]:
     """
     Разбить длинное сообщение на части с маркером "(n/m)".
@@ -225,8 +317,16 @@ async def send_long_message(
     context: ContextTypes.DEFAULT_TYPE,
     parse_mode: str | None = None,
     message_thread_id: int | None = None,
+    auto_format: bool = True,
 ) -> None:
-    """Отправить сообщение, разбив на части если нужно."""
+    """Отправить сообщение, разбив на части если нужно.
+
+    Если auto_format=True (по умолчанию), автоматически конвертирует
+    Markdown в HTML для Telegram-форматирования.
+    """
+    if auto_format and parse_mode is None:
+        text, parse_mode = format_for_telegram(text)
+
     parts = split_message(text)
 
     for part in parts:
@@ -237,9 +337,13 @@ async def send_long_message(
                 parse_mode=parse_mode,
                 message_thread_id=message_thread_id,
             )
-        except Exception:
-            # Если MarkdownV2 не парсится — отправить plain text
+        except Exception as _e:
+            # Если HTML не парсится — отправить plain text
             if parse_mode:
+                logger.warning(
+                    f"send_long_message: HTML parse failed ({_e}), fallback to plain text\n"
+                    f"HTML preview: {part[:300]!r}"
+                )
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=part,
@@ -309,11 +413,21 @@ class StatusMessage:
 
         # Если текст влезает в одно сообщение — edit на месте
         if len(text) <= TG_MESSAGE_LIMIT:
+            formatted_text, fmt_parse_mode = format_for_telegram(text)
+
+            # Если ответ содержит блок кода с языком — удалить статус и отправить
+            # новым сообщением, иначе Telegram не показывает кнопку Copy Code на edit.
+            has_code_block = fmt_parse_mode and '<pre><code class="language-' in formatted_text
+            if has_code_block:
+                await self.cleanup()
+                return False
+
             try:
                 await self.context.bot.edit_message_text(
                     chat_id=self.chat_id,
                     message_id=self.message_id,
-                    text=text,
+                    text=formatted_text,
+                    parse_mode=fmt_parse_mode,
                 )
                 self.message_id = None  # Больше не управляем этим сообщением
                 return True
@@ -322,6 +436,18 @@ class StatusMessage:
                 if "is not modified" in str(e):
                     self.message_id = None
                     return True
+                # Если HTML не парсится — попробовать plain text
+                if fmt_parse_mode:
+                    try:
+                        await self.context.bot.edit_message_text(
+                            chat_id=self.chat_id,
+                            message_id=self.message_id,
+                            text=text,
+                        )
+                        self.message_id = None
+                        return True
+                    except Exception:
+                        pass
                 logger.debug(f"Finalize edit failed: {e}")
                 # Если edit не сработал — fallback на delete+send
                 await self.cleanup()
@@ -3072,16 +3198,36 @@ class TelegramBridge:
         message_thread_id: int | None = None,
     ) -> None:
         """Отправить сообщение через бота (из bus listener)."""
-        parts = split_message(text)
+        formatted_text, parse_mode = format_for_telegram(text)
+        parts = split_message(formatted_text)
         for part in parts:
             try:
                 await app.bot.send_message(
                     chat_id=chat_id,
                     text=part,
+                    parse_mode=parse_mode,
                     message_thread_id=message_thread_id,
                 )
             except Exception as e:
-                logger.error(f"Send error to {chat_id}: {e}")
+                # Если HTML не парсится — отправить plain text
+                if parse_mode:
+                    logger.warning(
+                        f"HTML send failed for chat {chat_id}: {e}\n"
+                        f"HTML preview: {part[:300]!r}"
+                    )
+                    try:
+                        plain_parts = split_message(text)
+                        idx = parts.index(part)
+                        plain_part = plain_parts[idx] if idx < len(plain_parts) else part
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=plain_part,
+                            message_thread_id=message_thread_id,
+                        )
+                    except Exception as e2:
+                        logger.error(f"Send error to {chat_id}: {e2}")
+                else:
+                    logger.error(f"Send error to {chat_id}: {e}")
             if len(parts) > 1:
                 await asyncio.sleep(0.3)
 
