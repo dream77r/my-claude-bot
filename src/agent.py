@@ -115,6 +115,11 @@ class Agent:
         # Семафор для ограничения параллельных вызовов Claude
         self._semaphore: asyncio.Semaphore | None = None
 
+        # Счётчик подряд-идущих ошибок per-user (effective_dir → count).
+        # После 2 фейлов подряд сбрасываем session_id: накопленный битый
+        # session-state перестаёт заражать следующие попытки.
+        self._consecutive_errors: dict[str, int] = {}
+
         # Hook-система (lifecycle hooks)
         self.hooks = HookRegistry()
 
@@ -827,6 +832,25 @@ class Agent:
                 return flags[i + 1].split(",")
         return None
 
+    # Порог подряд-идущих ошибок, после которого сбрасываем session_id.
+    # Битая сессия может отправлять каждый следующий вызов в ту же яму —
+    # сброс даёт агенту чистый старт. Два — чтобы не реагировать на
+    # случайные сетевые сбои.
+    ERROR_RESET_THRESHOLD = 2
+
+    def _on_user_visible_error(self, effective_dir: str) -> str:
+        """Инкремент счётчика ошибок; при пороге — сбрасываем session_id."""
+        count = self._consecutive_errors.get(effective_dir, 0) + 1
+        self._consecutive_errors[effective_dir] = count
+        if count >= self.ERROR_RESET_THRESHOLD:
+            logger.warning(
+                f"Agent '{self.name}': {count} consecutive errors for "
+                f"{effective_dir}, clearing session_id"
+            )
+            memory.clear_session_id(effective_dir)
+            self._consecutive_errors.pop(effective_dir, None)
+        return "Произошла ошибка. Попробуй ещё раз."
+
     async def call_claude(
         self,
         message: str,
@@ -1095,13 +1119,16 @@ class Agent:
                             )
                     except Exception as retry_err:
                         logger.error(f"Retry failed: {retry_err}")
-                        return "Произошла ошибка. Попробуй ещё раз."
+                        return self._on_user_visible_error(effective_dir)
                 else:
-                    return "Произошла ошибка. Попробуй ещё раз."
+                    return self._on_user_visible_error(effective_dir)
 
             # Сохранить session_id (per-user)
             if new_session_id:
                 memory.save_session_id(effective_dir, new_session_id)
+
+            # Успешный ответ — сбрасываем счётчик последовательных ошибок.
+            self._consecutive_errors.pop(effective_dir, None)
 
             # Auto-commit памяти после каждого ответа (per-user).
             # Debounced: несколько подряд идущих ответов сливаются в один коммит,
