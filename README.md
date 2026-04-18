@@ -122,7 +122,20 @@ journalctl --user -u my-claude-bot -f    # real-time logs
 systemctl --user restart my-claude-bot   # manual restart
 ```
 
-## Running with Docker (alternative)
+## Running with Docker (local dev only)
+
+> **⚠ Don't run Docker alongside systemd.** Both read the same `.env`, so both
+> would poll Telegram with the same bot token — Telegram kicks both processes
+> with `Conflict: terminated by other getUpdates request`. The bot now bails
+> out on startup if another instance holds the same token, but that means one
+> of the two will simply refuse to start. Pick one deployment, not both.
+>
+> If you ran `./setup.sh` you already have the systemd unit. To use Docker
+> instead, stop systemd first: `systemctl --user disable --now my-claude-bot`.
+
+Docker is useful for local development (e.g. on macOS/Windows) or isolated
+testing. For production on Linux, use systemd — it's what `./setup.sh`
+installs and what `/restart` and `/setup_dashboard` expect.
 
 ```bash
 cp .env.example .env

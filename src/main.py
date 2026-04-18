@@ -9,12 +9,17 @@ FleetRuntime — глобальный контекст для hot-reload аге�
 """
 
 import asyncio
+import fcntl
+import hashlib
 import logging
 import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Held for process lifetime so the flock isn't released by GC.
+_singleton_lock_handle = None
 
 
 def _master_notify_chat_id(agent: "Agent") -> int:
@@ -407,6 +412,54 @@ def _cleanup_qmd() -> None:
         logger.info("qmd удалён — wiki-поиск работает через встроенный search_wiki()")
 
 
+def _acquire_singleton_lock(agents: list[Agent]) -> None:
+    """Prevent a second instance from polling Telegram with the same tokens.
+
+    Two processes calling getUpdates for the same bot token make Telegram
+    kick both with `Conflict`. The lock file lives at `/tmp/my-claude-bot-
+    <sha256-of-tokens>.lock` so it catches any double-start combo —
+    systemd+docker, two systemd units, `docker compose up` on top of a
+    running service, a forgotten `nohup`. Mode 0666 lets a container
+    running under a different host UID see the same lock.
+    """
+    global _singleton_lock_handle
+
+    tokens = sorted({a.bot_token for a in agents if a.bot_token and "${" not in a.bot_token})
+    if not tokens:
+        return
+
+    digest = hashlib.sha256("|".join(tokens).encode()).hexdigest()[:16]
+    lock_path = Path(f"/tmp/my-claude-bot-{digest}.lock")
+
+    prev_umask = os.umask(0)
+    try:
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o666)
+    finally:
+        os.umask(prev_umask)
+
+    fh = os.fdopen(fd, "r+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.seek(0)
+        existing = fh.read().strip() or "unknown"
+        fh.close()
+        logger.error(
+            "Another bot instance is already running for these Telegram tokens (pid %s).\n"
+            "  Two processes polling the same token = Telegram kicks both with Conflict.\n"
+            "  Check:  systemctl --user status my-claude-bot   and   docker ps\n"
+            "  Fix:    stop one of them (likely `docker compose down` if systemd is the canonical deploy).",
+            existing,
+        )
+        sys.exit(1)
+
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    _singleton_lock_handle = fh
+
+
 async def async_main() -> None:
     """Главная async функция."""
     root = find_project_root()
@@ -431,6 +484,9 @@ async def async_main() -> None:
     if not agents:
         logger.error("Нет агентов для запуска. Проверь agents/*/agent.yaml")
         sys.exit(1)
+
+    # Защита от параллельного запуска (systemd + docker compose, и т.п.)
+    _acquire_singleton_lock(agents)
 
     # Глобальный семафор для Claude CLI
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLAUDE)

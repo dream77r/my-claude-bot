@@ -122,7 +122,20 @@ journalctl --user -u my-claude-bot -f    # логи в реальном врем
 systemctl --user restart my-claude-bot   # ручной перезапуск
 ```
 
-## Запуск через Docker (альтернатива)
+## Запуск через Docker (только для локальной разработки)
+
+> **⚠ Не запускай Docker рядом с systemd.** Оба читают один `.env`, оба
+> ходят в Telegram с одним токеном — Telegram валит обоих процессов ошибкой
+> `Conflict: terminated by other getUpdates request`. Теперь бот при старте
+> отказывается подниматься, если тот же токен уже держит другой процесс —
+> так что один из двух просто не запустится. Выбирай один способ деплоя.
+>
+> Если делал `./setup.sh` — systemd-юнит уже стоит. Чтобы перейти на Docker,
+> сначала выключи systemd: `systemctl --user disable --now my-claude-bot`.
+
+Docker удобен для локальной разработки (macOS/Windows) или изолированных
+тестов. Для прода на Linux — systemd: его ставит `./setup.sh`, на него
+завязаны `/restart` и `/setup_dashboard`.
 
 ```bash
 cp .env.example .env
