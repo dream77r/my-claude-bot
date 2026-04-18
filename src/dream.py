@@ -71,18 +71,43 @@ TEMPLATE_SPLIT_MARKER = "<!-- SYSTEM/USER SPLIT -->"
 
 
 def _load_template(agent_dir: str, template_name: str) -> str:
-    """Загрузить промпт-шаблон из templates/."""
+    """Загрузить промпт-шаблон из templates/.
+
+    Per-instance extension: если рядом со стоковым `foo.md` лежит
+    `foo.local.md`, его содержимое дописывается в конец шаблона. Это даёт
+    оператору точку расширения, не конфликтующую с `git pull` — стоковый
+    шаблон остаётся под контролем апстрима, а дополнения живут отдельным
+    файлом (конвенция `.local.*` совпадает с планируемым yaml-overlay'ем).
+
+    `.local.md` попадает в user-часть промпта (после SYSTEM/USER SPLIT-маркера,
+    если он есть), то есть не кешируется — что ок: апдейты расширений
+    редкие, а система кеш-промпта не ломается.
+    """
     path = Path(agent_dir) / "templates" / template_name
     if path.exists():
-        return path.read_text(encoding="utf-8")
-    # Fallback: простой шаблон
-    logger.warning(f"Шаблон {template_name} не найден, используется fallback")
-    if "phase1" in template_name:
-        return (
-            "Извлеки ключевые факты из этих сообщений:\n\n{conversations}\n\n"
-            'Ответь в JSON: {"facts": [...], "summary": "..."}'
-        )
-    return "Обнови wiki на основе этих фактов:\n\n{facts_json}"
+        content = path.read_text(encoding="utf-8")
+    else:
+        logger.warning(f"Шаблон {template_name} не найден, используется fallback")
+        if "phase1" in template_name:
+            content = (
+                "Извлеки ключевые факты из этих сообщений:\n\n{conversations}\n\n"
+                'Ответь в JSON: {"facts": [...], "summary": "..."}'
+            )
+        else:
+            content = "Обнови wiki на основе этих фактов:\n\n{facts_json}"
+
+    local_path = path.with_name(path.stem + ".local" + path.suffix)
+    if local_path.exists():
+        extension = local_path.read_text(encoding="utf-8").strip()
+        if extension:
+            content = (
+                content.rstrip()
+                + "\n\n## Дополнительные инструкции оператора\n\n"
+                + extension
+                + "\n"
+            )
+            logger.info(f"Применено per-instance расширение: {local_path.name}")
+    return content
 
 
 def _split_template(text: str) -> tuple[str | None, str]:

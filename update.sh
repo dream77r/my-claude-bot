@@ -1,15 +1,60 @@
 #!/bin/bash
 # My Claude Bot — Update to latest version
-# Usage: ./update.sh
+# Usage: ./update.sh [-y|--yes]
+#
+# Flags:
+#   -y, --yes   Non-interactive mode: auto-accept stash prompt,
+#               auto-install bubblewrap if an agent requires it.
+#               Also implied when stdin is not a TTY (CI, systemd timers,
+#               remote ssh scripts).
 #
 # What it does:
 # 1. Checks for local changes that might conflict
 # 2. Pulls latest code from GitHub
-# 3. Updates Python dependencies
+# 3. Updates Python dependencies (always — idempotent)
 # 4. Restarts the service (systemd or docker)
 # 5. Shows what changed
 
 set -e
+
+# ══════════════════════════════════════════
+# Флаги и интерактивность
+# ══════════════════════════════════════════
+
+AUTO_YES=0
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) AUTO_YES=1 ;;
+        -h|--help)
+            sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "Unknown flag: $arg (try --help)"
+            exit 2
+            ;;
+    esac
+done
+
+# Если stdin не TTY (CI, systemd ExecStart, ssh-скрипт), считаем что ответов
+# не будет — включаем auto-yes, чтобы не зависнуть на `read -rp`.
+if [ ! -t 0 ]; then
+    AUTO_YES=1
+fi
+
+# Безопасный prompt: в интерактивном режиме читает ответ, в auto-yes —
+# печатает выбранный default и возвращает его. Usage: _ask "текст" "Y" VAR_NAME
+_ask() {
+    local prompt_text="$1"
+    local default_answer="$2"
+    local out_var="$3"
+    if [ "$AUTO_YES" -eq 1 ]; then
+        printf "  %s [auto-%s]\n" "$prompt_text" "$default_answer"
+        printf -v "$out_var" '%s' "$default_answer"
+    else
+        read -rp "  ${prompt_text} " "$out_var"
+    fi
+}
 
 BOLD='\033[1m'
 GREEN='\033[32m'
@@ -73,7 +118,7 @@ if [ -n "$LOCAL_CHANGES" ]; then
     echo "$LOCAL_CHANGES" | while read -r f; do echo -e "    ${DIM}$f${RESET}"; done
     echo ""
     echo -e "  These will be stashed (saved) before update and can be restored."
-    read -rp "  Continue? [Y/n] " CONFIRM
+    _ask "Continue? [Y/n]" "Y" CONFIRM
     if [[ "$CONFIRM" =~ ^[nN] ]]; then
         echo -e "${YELLOW}  Update cancelled.${RESET}"
         exit 0
@@ -137,24 +182,20 @@ if [ "$ALREADY_CURRENT" -eq 0 ]; then
     # Pull
     git pull --ff-only origin "$BRANCH" 2>/dev/null
     echo -e "${GREEN}  ✓ Code updated${RESET}"
-
-    # ══════════════════════════════════════════
-    # Обновление зависимостей
-    # ══════════════════════════════════════════
-
-    echo ""
-    echo -e "${BOLD}Updating dependencies...${RESET}"
-
-    # Проверяем, изменился ли requirements.txt
-    REQ_CHANGED=$(git diff --name-only "${LOCAL}..HEAD" -- requirements.txt 2>/dev/null || true)
-
-    if [ -n "$REQ_CHANGED" ]; then
-        python3 -m pip install --user -q -r requirements.txt 2>&1 | tail -5
-        echo -e "${GREEN}  ✓ Dependencies updated${RESET}"
-    else
-        echo -e "${GREEN}  ✓ No dependency changes${RESET}"
-    fi
 fi
+
+# ══════════════════════════════════════════
+# Обновление зависимостей
+# ══════════════════════════════════════════
+# Гоним pip install безусловно — он идемпотентный и дешёвый (1-2с на no-op).
+# Опора на `git diff LOCAL..HEAD` ломалась, когда оператор делал `git pull`
+# руками до запуска скрипта: diff пуст, pip install пропускается, сервис
+# падает на ModuleNotFoundError при новых зависимостях.
+
+echo ""
+echo -e "${BOLD}Syncing dependencies...${RESET}"
+python3 -m pip install --user -q -r requirements.txt 2>&1 | tail -5
+echo -e "${GREEN}  ✓ Dependencies in sync${RESET}"
 
 # ══════════════════════════════════════════
 # Миграция .env — добавить новые ключи
@@ -216,7 +257,7 @@ if [ -n "$WANTS_BWRAP" ]; then
         echo -e "${YELLOW}  ⚠ Agents требуют bubblewrap, но bwrap не установлен${RESET}"
         AGENT_LIST=$(echo "$WANTS_BWRAP" | xargs -I{} dirname {} | xargs -I{} basename {} | tr '\n' ' ')
         echo -e "${DIM}    Агенты: ${AGENT_LIST}${RESET}"
-        read -rp "  Install bubblewrap now (recommended)? [Y/n] " INSTALL_BWRAP
+        _ask "Install bubblewrap now (recommended)? [Y/n]" "Y" INSTALL_BWRAP
         if [[ ! "$INSTALL_BWRAP" =~ ^[nN] ]]; then
             if sudo apt-get install -y bubblewrap 2>&1 | tail -3; then
                 echo -e "${GREEN}  ✓ bubblewrap installed${RESET}"

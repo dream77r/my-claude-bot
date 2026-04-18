@@ -124,9 +124,12 @@ def _name_is_blocked(name: str) -> bool:
 
 # Папки wiki/, которые lint НЕ считает за entity-страницы. Сюда попадают:
 # - synthesis/ — это L3-синтез, а не entity;
-# - concepts/, entities/ — legacy pre-типизации (до Этапа 3), оставлены для
-#   обратной совместимости, но новыми entity считаться не должны.
-_LINT_IGNORED_SUBDIRS = {"synthesis", "concepts", "entities"}
+# - concepts/ — legacy pre-типизации (до Этапа 3), оставлена для обратной
+#   совместимости, новыми concept-страницами считаться не должна.
+# NB: entities/ сюда НЕ входит — это активная папка, куда попадают Person/
+# Topic/прочие типизированные entity (см. agent_manager bootstrap и
+# promote-инструкции агентам про wiki/entities/).
+_LINT_IGNORED_SUBDIRS = {"synthesis", "concepts"}
 
 # Корневые md-файлы внутри wiki/, которые не являются entity-страницами.
 _LINT_IGNORED_ROOT_FILES = {"index.md"}
