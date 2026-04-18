@@ -977,7 +977,12 @@ class Agent:
         if session_id:
             options.resume = session_id
 
-        async def _process_message(msg, result_text: str, new_session_id: str | None):
+        async def _process_message(
+            msg,
+            result_text: str,
+            new_session_id: str | None,
+            stop_reason: str | None,
+        ):
             """Обработать одно сообщение из потока Claude."""
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
@@ -1011,12 +1016,20 @@ class Agent:
                     new_session_id = msg.session_id
                 if msg.result and not result_text:
                     result_text = msg.result
-            return result_text, new_session_id
+                if msg.stop_reason:
+                    stop_reason = msg.stop_reason
+            return result_text, new_session_id, stop_reason
+
+        # Максимум попыток длинного ответа: если модель упирается в лимит
+        # токенов, автоматически просим её продолжить. Cap нужен, чтобы не
+        # улететь в бесконечный цикл при странном поведении.
+        MAX_LENGTH_RECOVERY = 2
 
         # Вызов с семафором
         async def _do_query() -> str:
             result_text = ""
             new_session_id = None
+            stop_reason: str | None = None
 
             # Hook: before_call
             before_ctx = await self.hooks.emit("before_call", HookContext(
@@ -1033,9 +1046,29 @@ class Agent:
 
             try:
                 async for msg in query(prompt=prompt_final, options=options):
-                    result_text, new_session_id = await _process_message(
-                        msg, result_text, new_session_id
+                    result_text, new_session_id, stop_reason = await _process_message(
+                        msg, result_text, new_session_id, stop_reason
                     )
+
+                # Length Recovery: ответ упёрся в max_tokens — попросим
+                # продолжить, resuming ту же сессию. Повторяем до N раз.
+                recoveries = 0
+                while (
+                    stop_reason == "max_tokens"
+                    and recoveries < MAX_LENGTH_RECOVERY
+                    and new_session_id
+                ):
+                    recoveries += 1
+                    logger.info(
+                        f"Agent '{self.name}': max_tokens, continuation "
+                        f"{recoveries}/{MAX_LENGTH_RECOVERY}"
+                    )
+                    options.resume = new_session_id
+                    stop_reason = None
+                    async for msg in query(prompt="Продолжи.", options=options):
+                        result_text, new_session_id, stop_reason = await _process_message(
+                            msg, result_text, new_session_id, stop_reason
+                        )
 
             except Exception as e:
                 error_name = type(e).__name__
@@ -1057,8 +1090,8 @@ class Agent:
                     options.resume = None
                     try:
                         async for msg in query(prompt=prompt_final, options=options):
-                            result_text, new_session_id = await _process_message(
-                                msg, result_text, new_session_id
+                            result_text, new_session_id, stop_reason = await _process_message(
+                                msg, result_text, new_session_id, stop_reason
                             )
                     except Exception as retry_err:
                         logger.error(f"Retry failed: {retry_err}")
