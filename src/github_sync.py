@@ -23,11 +23,12 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
+
+from .git_utils import run_git_checked
 
 logger = logging.getLogger(__name__)
 
@@ -36,26 +37,8 @@ _MEMORY_EXCLUDE = {"sessions", "outbox", "dispatch", ".git"}
 
 
 def _run_git(args: list[str], cwd: Path) -> tuple[bool, str]:
-    """Выполнить git команду, вернуть (ok, output)."""
-    try:
-        result = subprocess.run(
-            ["git"] + args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        output = result.stdout + result.stderr
-        if result.returncode != 0:
-            logger.debug(f"git {' '.join(args)}: {result.stderr.strip()}")
-            return False, output
-        return True, output
-    except subprocess.TimeoutExpired:
-        logger.error(f"git {' '.join(args)}: timeout")
-        return False, "timeout"
-    except Exception as e:
-        logger.error(f"git {' '.join(args)}: {e}")
-        return False, str(e)
+    """Выполнить git команду, вернуть (ok, output). Тонкая обёртка над git_utils."""
+    return run_git_checked(args, cwd=cwd, timeout=120)
 
 
 def _get_client_folder(project_root: Path) -> str:

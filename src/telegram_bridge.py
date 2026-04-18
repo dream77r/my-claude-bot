@@ -15,13 +15,11 @@ Telegram Bridge — хэндлеры для Telegram-бота.
 import asyncio
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -35,7 +33,20 @@ from telegram.ext import (
 from . import memory
 from .command_router import CommandRouter
 from .file_handler import clear_outbox, download_file, send_file
+from .formatter import (
+    TG_MESSAGE_LIMIT,
+    escape_markdown_v2,
+    format_for_telegram,
+    markdown_to_html,
+    split_message,
+)
 from .i18n import t
+from .status_message import (
+    EDIT_MIN_INTERVAL,
+    STREAM_EDIT_INTERVAL,
+    TYPING_KEEPALIVE_INTERVAL,
+    StatusMessage,
+)
 from .voice_handler import download_voice, get_deepgram_api_key, transcribe
 
 if TYPE_CHECKING:
@@ -45,20 +56,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Telegram лимит на длину сообщения
-TG_MESSAGE_LIMIT = 4096
-
 # Буфер для message aggregation (секунды)
 MESSAGE_BUFFER_DELAY = 0.6
 
-# Минимальный интервал между edit-сообщениями (coalescing)
-EDIT_MIN_INTERVAL = 0.5
-
-# Интервал для streaming текста (быстрее чем tool hints)
-STREAM_EDIT_INTERVAL = 0.3
-
-# Интервал typing indicator (секунды)
-TYPING_KEEPALIVE_INTERVAL = 4
+# Реэкспорт для обратной совместимости с тестами/модулями, которые
+# импортируют эти символы из telegram_bridge (исторически они жили здесь).
+__all__ = [
+    "TG_MESSAGE_LIMIT",
+    "EDIT_MIN_INTERVAL",
+    "STREAM_EDIT_INTERVAL",
+    "TYPING_KEEPALIVE_INTERVAL",
+    "escape_markdown_v2",
+    "markdown_to_html",
+    "format_for_telegram",
+    "split_message",
+    "StatusMessage",
+]
 
 # Команды для меню бота (кнопка "/" в Telegram)
 BOT_COMMANDS = [
@@ -131,225 +144,6 @@ def _model_keyboard(current_model: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def escape_markdown_v2(text: str) -> str:
-    """Экранировать спецсимволы для MarkdownV2, сохраняя форматирование."""
-    # Сначала обработаем блоки кода — их не трогаем
-    code_blocks = []
-    inline_codes = []
-
-    # Извлечь ``` блоки
-    def save_code_block(match):
-        code_blocks.append(match.group(0))
-        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
-
-    text = re.sub(r"```[\s\S]*?```", save_code_block, text)
-
-    # Извлечь `inline` код
-    def save_inline_code(match):
-        inline_codes.append(match.group(0))
-        return f"\x00INLINE{len(inline_codes) - 1}\x00"
-
-    text = re.sub(r"`[^`]+`", save_inline_code, text)
-
-    # Экранировать спецсимволы MarkdownV2 (кроме *, _, ~, ||)
-    # Эти символы нужно экранировать: _ * [ ] ( ) ~ ` > # + - = | { } . !
-    # Но *, _, ~ используются для форматирования — экранируем только если не парные
-    escape_chars = r"[\\\[\]()>#+\-=|{}.!]"
-    text = re.sub(escape_chars, r"\\\g<0>", text)
-
-    # Вернуть блоки кода
-    for i, block in enumerate(code_blocks):
-        text = text.replace(f"\x00CODEBLOCK{i}\x00", block)
-
-    for i, code in enumerate(inline_codes):
-        text = text.replace(f"\x00INLINE{i}\x00", code)
-
-    return text
-
-
-def markdown_to_html(text: str) -> str:
-    """Конвертировать Claude Markdown в Telegram HTML-форматирование.
-
-    Поддерживает:
-    - Блоки кода с подсветкой синтаксиса (```lang\\ncode```) → <pre><code>
-    - Inline-код (`code`) → <code>
-    - Жирный (**text** и __text__) → <b>
-    - Курсив (_text_) → <i>
-    - Зачёркнутый (~~text~~) → <s>
-    - Заголовки (# text) → <b>
-    - Ссылки ([text](url)) → <a href>
-    """
-    import html as _html
-
-    result = []
-
-    # Шаг 1: разбить на блоки кода и обычный текст
-    # Паттерн: ```lang\n...\n``` или просто ```\n...\n```
-    parts = re.split(r"(```(?:[^\n`]*)?\n[\s\S]*?```|```[\s\S]*?```)", text)
-
-    for i, part in enumerate(parts):
-        if i % 2 == 1:
-            # Блок кода — определить язык
-            m = re.match(r"```([^\n`]*)\n([\s\S]*?)```", part)
-            if m:
-                lang = m.group(1).strip()
-                code = _html.escape(m.group(2).rstrip("\n"))
-                if lang:
-                    result.append(f'<pre><code class="language-{lang}">{code}</code></pre>')
-                else:
-                    result.append(f"<pre><code>{code}</code></pre>")
-            else:
-                # Блок без языка и без новой строки
-                inner = re.sub(r"^```|```$", "", part).strip()
-                result.append(f"<pre><code>{_html.escape(inner)}</code></pre>")
-            continue
-
-        # Шаг 2: разбить на inline-код и обычный текст
-        subparts = re.split(r"(`[^`\n]+`)", part)
-        for j, subpart in enumerate(subparts):
-            if j % 2 == 1:
-                # Inline-код
-                code = _html.escape(subpart[1:-1])
-                result.append(f"<code>{code}</code>")
-                continue
-
-            # Шаг 3: обычный текст — экранировать HTML, затем применить форматирование
-            s = _html.escape(subpart)
-
-            # Заголовки (# text) — до остального, чтобы не ломать ссылки
-            s = re.sub(r"^#{1,6} (.+)$", r"<b>\1</b>", s, flags=re.MULTILINE)
-
-            # Жирный **text** и __text__
-            s = re.sub(r"\*\*([\s\S]+?)\*\*", r"<b>\1</b>", s)
-            s = re.sub(r"__([\s\S]+?)__", r"<b>\1</b>", s)
-
-            # Зачёркнутый ~~text~~
-            s = re.sub(r"~~([\s\S]+?)~~", r"<s>\1</s>", s)
-
-            # Курсив _text_ (не внутри слова: no_match_here)
-            s = re.sub(r"(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])", r"<i>\1</i>", s)
-
-            # Ссылки [text](url) — html.escape уже экранировал & в url как &amp;, это ок
-            s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', s)
-
-            result.append(s)
-
-    return "".join(result)
-
-
-def format_for_telegram(text: str) -> tuple[str, str | None]:
-    """Конвертировать ответ агента в HTML для Telegram.
-
-    Returns:
-        (formatted_text, parse_mode) — parse_mode=None если конвертация не нужна
-    """
-    # Если в тексте нет markdown-разметки — отправить как plain text
-    has_markdown = bool(re.search(
-        r"```|`[^`]|\*\*|__|\[.+\]\(.+\)|^#{1,6} |~~",
-        text,
-        re.MULTILINE,
-    ))
-    if not has_markdown:
-        return text, None
-    try:
-        html = markdown_to_html(text)
-        return html, ParseMode.HTML
-    except Exception as e:
-        logger.warning(f"format_for_telegram: markdown→HTML failed: {e}")
-        return text, None
-
-
-def split_message(text: str, limit: int = TG_MESSAGE_LIMIT) -> list[str]:
-    """
-    Разбить длинное сообщение на части с маркером "(n/m)".
-    Никогда не разбивает внутри ``` блоков кода.
-    Разбивает обычный текст по параграфам, строкам, потом жёстко.
-    """
-    if len(text) <= limit:
-        return [text]
-
-    # Место для маркера "(nn/mm)\n"
-    effective_limit = limit - 10
-
-    CODE_BLOCK_RE = re.compile(
-        r"(```(?:[^\n`]*)?\n[\s\S]*?```|```[\s\S]*?```)"
-    )
-    # Нечётные сегменты — блоки кода (нельзя разбивать)
-    segments = CODE_BLOCK_RE.split(text)
-
-    def _flush_text(buf: str) -> list[str]:
-        """Разбить обычный текст на куски ≤ effective_limit."""
-        result = []
-        remaining = buf
-        while len(remaining) > effective_limit:
-            cut = remaining.rfind("\n\n", 0, effective_limit)
-            if cut > effective_limit // 3:
-                result.append(remaining[:cut].rstrip())
-                remaining = remaining[cut + 2:]
-                continue
-            cut = remaining.rfind("\n", 0, effective_limit)
-            if cut > effective_limit // 3:
-                result.append(remaining[:cut].rstrip())
-                remaining = remaining[cut + 1:]
-                continue
-            cut = remaining.rfind(" ", 0, effective_limit)
-            if cut > effective_limit // 3:
-                result.append(remaining[:cut].rstrip())
-                remaining = remaining[cut + 1:]
-                continue
-            result.append(remaining[:effective_limit])
-            remaining = remaining[effective_limit:]
-        if remaining.strip():
-            result.append(remaining)
-        return result
-
-    parts: list[str] = []
-    current = ""
-
-    for i, segment in enumerate(segments):
-        is_code = i % 2 == 1
-
-        if is_code:
-            if len(current) + len(segment) <= effective_limit:
-                current += segment
-            else:
-                # Сброс текстового буфера
-                flushed = _flush_text(current)
-                if len(flushed) > 1:
-                    parts.extend(flushed[:-1])
-                    current = flushed[-1]
-                elif flushed:
-                    current = flushed[0]
-                # Добавить блок кода
-                if len(current) + len(segment) <= effective_limit:
-                    current += segment
-                else:
-                    if current.strip():
-                        parts.append(current.rstrip())
-                    # Блок кода превышает лимит — отправить целиком
-                    if len(segment) > effective_limit:
-                        parts.append(segment)
-                        current = ""
-                    else:
-                        current = segment
-        else:
-            current += segment
-
-    if current.strip():
-        flushed = _flush_text(current)
-        parts.extend(flushed)
-
-    parts = [p for p in parts if p.strip()]
-    if not parts:
-        return [text]
-
-    if len(parts) > 1:
-        total = len(parts)
-        parts = [f"({i + 1}/{total})\n{part}" for i, part in enumerate(parts)]
-
-    return parts
-
-
 async def send_long_message(
     chat_id: int,
     text: str,
@@ -412,208 +206,6 @@ async def send_long_message(
                 )
         if len(parts) > 1:
             await asyncio.sleep(0.3)
-
-
-class StatusMessage:
-    """
-    Сообщение-статус с защитой от rate limit (delta coalescing).
-
-    Показывает пользователю что делает агент (tool hints и streaming текст),
-    ограничивая edit-запросы до 1 раз в EDIT_MIN_INTERVAL секунд.
-
-    Поддерживает typing keepalive и финальный edit вместо delete+new.
-    """
-
-    def __init__(self, chat_id: int, context, thread_id: int | None = None):
-        self.chat_id = chat_id
-        self.context = context
-        self.thread_id = thread_id
-        self.message_id: int | None = None
-        self._last_edit: float = 0
-        self._pending_text: str | None = None
-        self._pending_task: asyncio.Task | None = None
-        self._typing_task: asyncio.Task | None = None
-        self._thinking_start: float | None = None
-        self._thinking_timer_task: asyncio.Task | None = None
-        self._is_streaming: bool = False
-
-    async def show(self, text: str, streaming: bool = False) -> None:
-        """Показать или обновить статус (с coalescing)."""
-        self._is_streaming = streaming
-        interval = STREAM_EDIT_INTERVAL if streaming else EDIT_MIN_INTERVAL
-        now = time.monotonic()
-        elapsed = now - self._last_edit
-
-        if elapsed >= interval:
-            await self._do_edit(text)
-        else:
-            # Отложить обновление
-            self._pending_text = text
-            if not self._pending_task or self._pending_task.done():
-                delay = interval - elapsed
-                self._pending_task = asyncio.create_task(
-                    self._delayed_edit(delay)
-                )
-
-    async def finalize(self, text: str) -> bool:
-        """
-        Финальное обновление — edit вместо delete+new.
-
-        Returns:
-            True если удалось отредактировать на месте.
-            False если нужен новый send (длинный текст, ошибка edit).
-        """
-        self._stop_typing()
-        self.stop_thinking_timer()
-        if self._pending_task and not self._pending_task.done():
-            self._pending_task.cancel()
-
-        if not self.message_id:
-            return False
-
-        # Если текст влезает в одно сообщение — edit на месте
-        if len(text) <= TG_MESSAGE_LIMIT:
-            formatted_text, fmt_parse_mode = format_for_telegram(text)
-
-            # Если ответ содержит блок кода — удалить статус и отправить
-            # новым сообщением, иначе Telegram не показывает кнопку Copy Code на edit.
-            has_code_block = fmt_parse_mode and "<pre><code" in formatted_text
-            if has_code_block:
-                await self.cleanup()
-                return False
-
-            try:
-                await self.context.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=self.message_id,
-                    text=formatted_text,
-                    parse_mode=fmt_parse_mode,
-                )
-                self.message_id = None  # Больше не управляем этим сообщением
-                return True
-            except Exception as e:
-                # "message is not modified" — текст уже тот же (из text_delta)
-                if "is not modified" in str(e):
-                    self.message_id = None
-                    return True
-                # Если HTML не парсится — попробовать plain text
-                if fmt_parse_mode:
-                    try:
-                        await self.context.bot.edit_message_text(
-                            chat_id=self.chat_id,
-                            message_id=self.message_id,
-                            text=text,
-                        )
-                        self.message_id = None
-                        return True
-                    except Exception:
-                        pass
-                logger.debug(f"Finalize edit failed: {e}")
-                # Если edit не сработал — fallback на delete+send
-                await self.cleanup()
-                return False
-
-        # Длинный текст — нужен split, delete статус
-        await self.cleanup()
-        return False
-
-    async def cleanup(self) -> None:
-        """Удалить статус-сообщение после завершения."""
-        self._stop_typing()
-        self.stop_thinking_timer()
-        if self._pending_task and not self._pending_task.done():
-            self._pending_task.cancel()
-        if self.message_id:
-            try:
-                await self.context.bot.delete_message(
-                    chat_id=self.chat_id,
-                    message_id=self.message_id,
-                )
-            except Exception:
-                pass  # Сообщение могло быть уже удалено
-            self.message_id = None
-
-    def start_typing(self) -> None:
-        """Запустить typing keepalive (ChatAction.TYPING каждые 4 секунды)."""
-        if self._typing_task and not self._typing_task.done():
-            return
-        self._typing_task = asyncio.create_task(self._typing_loop())
-
-    def _stop_typing(self) -> None:
-        """Остановить typing keepalive."""
-        if self._typing_task and not self._typing_task.done():
-            self._typing_task.cancel()
-            self._typing_task = None
-
-    async def _typing_loop(self) -> None:
-        """Цикл отправки ChatAction.TYPING."""
-        try:
-            while True:
-                try:
-                    await self.context.bot.send_chat_action(
-                        chat_id=self.chat_id,
-                        action=ChatAction.TYPING,
-                        message_thread_id=self.thread_id,
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL)
-        except asyncio.CancelledError:
-            pass
-
-    def start_thinking_timer(self) -> None:
-        """Запустить таймер 'Думаю... (Xс)', обновляется каждые 10 секунд."""
-        self._thinking_start = time.monotonic()
-        if self._thinking_timer_task and not self._thinking_timer_task.done():
-            return
-        self._thinking_timer_task = asyncio.create_task(self._thinking_timer_loop())
-
-    def stop_thinking_timer(self) -> None:
-        """Остановить таймер 'Думаю...'."""
-        if self._thinking_timer_task and not self._thinking_timer_task.done():
-            self._thinking_timer_task.cancel()
-            self._thinking_timer_task = None
-
-    async def _thinking_timer_loop(self) -> None:
-        """Цикл обновления 'Думаю... (10с)', '(20с)' и т.д."""
-        try:
-            while True:
-                await asyncio.sleep(10)
-                if self._thinking_start is None:
-                    break
-                elapsed = int(time.monotonic() - self._thinking_start)
-                await self._do_edit(f"💬 Думаю... ({elapsed}с)")
-        except asyncio.CancelledError:
-            pass
-
-    async def _delayed_edit(self, delay: float) -> None:
-        """Отложенное обновление для coalescing."""
-        await asyncio.sleep(delay)
-        if self._pending_text:
-            text = self._pending_text
-            self._pending_text = None
-            await self._do_edit(text)
-
-    async def _do_edit(self, text: str) -> None:
-        """Непосредственное обновление сообщения."""
-        self._last_edit = time.monotonic()
-        try:
-            if self.message_id:
-                await self.context.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=self.message_id,
-                    text=text[:TG_MESSAGE_LIMIT],
-                )
-            else:
-                msg = await self.context.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=text[:TG_MESSAGE_LIMIT],
-                    message_thread_id=self.thread_id,
-                )
-                self.message_id = msg.message_id
-        except Exception as e:
-            # Telegram может вернуть "message is not modified" — это нормально
-            logger.debug(f"Status edit: {e}")
 
 
 class TelegramBridge:

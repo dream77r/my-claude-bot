@@ -21,6 +21,8 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .git_utils import run_git
+
 logger = logging.getLogger(__name__)
 
 
@@ -972,13 +974,7 @@ def get_recent_messages(
 
 def _run_git(memory_path: Path, *args: str) -> subprocess.CompletedProcess:
     """Выполнить git-команду в директории памяти."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(memory_path),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    return run_git(args, cwd=memory_path, timeout=30)
 
 
 def git_init(agent_dir: str) -> bool:
