@@ -1006,6 +1006,14 @@ class TelegramBridge:
             f"не найдено — честно скажи об этом, не выдумывай."
         )
         user_id = update.effective_user.id if update.effective_user else None
+        # Early persist (только если это не группа).
+        if not self._is_group_chat(update):
+            try:
+                memory.log_message(
+                    self._effective_dir(update), "user", f"/recall {query}"
+                )
+            except Exception as e:
+                logger.error(f"early_persist recall failed: {e}")
         self._add_to_buffer(chat_id, prompt, None, context, user_id=user_id)
 
     async def _cmd_model(
@@ -2325,11 +2333,9 @@ class TelegramBridge:
             combined = combined + t("onboarding_save_instruction", lang)
             memory.mark_onboarding_done(user_dir)
 
-        # Логируем входящее сообщение (в DM — в личный лог, в группах уже залогировано)
-        if not is_group:
-            memory.log_message(
-                user_dir, "user", "\n".join(messages), files or None
-            )
+        # Входящие сообщения уже залогированы в _handle_text/_handle_document/
+        # _handle_photo/_handle_voice как early persist — до буферизации.
+        # Тут не дублируем.
 
         # ── Режим MessageBus ──
         if self.bus:
@@ -2606,6 +2612,17 @@ class TelegramBridge:
             sender_name = self._get_sender_name(update)
             text = f"[{sender_name}]: {text}"
 
+        # Early persist — сохраняем до буферизации/LLM-вызова.
+        # Если процесс упадёт в буфере или в середине call_claude — сообщение
+        # уже на диске. В группах лог выше (log_group_message в 2564).
+        if not is_group:
+            try:
+                memory.log_message(
+                    self._effective_dir(update), "user", text
+                )
+            except Exception as e:
+                logger.error(f"early_persist text failed: {e}")
+
         self._add_to_buffer(chat_id, text, None, context, user_id=update.effective_user.id if update.effective_user else None)
 
     async def _handle_document(
@@ -2644,6 +2661,14 @@ class TelegramBridge:
             file_path = await download_file(
                 context.bot, doc.file_id, self._effective_dir(update)
             )
+            # Early persist (DM). В группах лог выше.
+            if not is_group:
+                try:
+                    memory.log_message(
+                        self._effective_dir(update), "user", caption, [file_path]
+                    )
+                except Exception as e:
+                    logger.error(f"early_persist document failed: {e}")
             self._add_to_buffer(chat_id, caption, file_path, context, user_id=update.effective_user.id if update.effective_user else None)
         except Exception as e:
             logger.error(f"File download error: {e}")
@@ -2681,6 +2706,14 @@ class TelegramBridge:
             file_path = await download_file(
                 context.bot, photo.file_id, self._effective_dir(update)
             )
+            # Early persist (DM). В группах лог выше.
+            if not is_group:
+                try:
+                    memory.log_message(
+                        self._effective_dir(update), "user", caption, [file_path]
+                    )
+                except Exception as e:
+                    logger.error(f"early_persist photo failed: {e}")
             self._add_to_buffer(chat_id, caption, file_path, context, user_id=update.effective_user.id if update.effective_user else None)
         except Exception as e:
             logger.error(f"Photo download error: {e}")
@@ -2741,6 +2774,12 @@ class TelegramBridge:
 
             # Добавить в буфер как текст (с пометкой что это голосовое)
             text = f"[голосовое сообщение]: {transcript}"
+            # Early persist (DM). В группах лог выше.
+            if not is_group:
+                try:
+                    memory.log_message(user_dir, "user", text)
+                except Exception as e:
+                    logger.error(f"early_persist voice failed: {e}")
             self._add_to_buffer(chat_id, text, None, context, user_id=update.effective_user.id if update.effective_user else None)
 
         except ValueError as e:
