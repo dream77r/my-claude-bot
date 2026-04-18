@@ -9,6 +9,8 @@ from src.dream import (
     _extract_json,
     _get_cursor,
     _save_cursor,
+    _split_template,
+    _substitute,
     get_unprocessed_messages,
 )
 from src.memory import ensure_dirs, get_memory_path, log_message
@@ -92,3 +94,43 @@ class TestExtractJson:
         text = '```json\n{invalid json}\n```'
         result = _extract_json(text)
         assert result is None
+
+
+class TestSplitTemplate:
+    def test_no_marker_returns_none_system(self):
+        system, user = _split_template("just a prompt {x}")
+        assert system is None
+        assert user == "just a prompt {x}"
+
+    def test_splits_on_marker(self):
+        text = "INSTRUCTIONS\n\n<!-- SYSTEM/USER SPLIT -->\n\nDATA"
+        system, user = _split_template(text)
+        assert system == "INSTRUCTIONS"
+        assert user == "DATA"
+
+    def test_strips_whitespace(self):
+        text = "  sys  \n<!-- SYSTEM/USER SPLIT -->\n  usr  "
+        system, user = _split_template(text)
+        assert system == "sys"
+        assert user == "usr"
+
+
+class TestSubstitute:
+    def test_replaces_single_key(self):
+        assert _substitute("hello {name}", name="world") == "hello world"
+
+    def test_leaves_unlisted_braces_alone(self):
+        """{slug} в теле шаблона не должен трогаться, если ключа нет в kwargs."""
+        template = "Update wiki/{slug}.md with {facts}"
+        result = _substitute(template, facts="X")
+        assert result == "Update wiki/{slug}.md with X"
+
+    def test_survives_literal_json_braces(self):
+        """.format() падает на JSON-примерах в шаблоне, .replace() — нет."""
+        template = 'Respond: {"facts": [...]} -- real value: {x}'
+        result = _substitute(template, x="here")
+        assert result == 'Respond: {"facts": [...]} -- real value: here'
+
+    def test_multiple_keys(self):
+        result = _substitute("{a}-{b}-{a}", a="X", b="Y")
+        assert result == "X-Y-X"

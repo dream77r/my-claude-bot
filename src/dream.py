@@ -63,6 +63,13 @@ def get_unprocessed_messages(agent_dir: str) -> list[dict]:
     return result
 
 
+# Marker в шаблонах — разделяет стабильную (cached system_prompt) и
+# переменную (user prompt) части. Claude CLI автоматически кэширует
+# system_prompt, поэтому вынос инструкций и формата ответа в системную
+# часть экономит 80-90% токенов на повторных Dream-циклах.
+TEMPLATE_SPLIT_MARKER = "<!-- SYSTEM/USER SPLIT -->"
+
+
 def _load_template(agent_dir: str, template_name: str) -> str:
     """Загрузить промпт-шаблон из templates/."""
     path = Path(agent_dir) / "templates" / template_name
@@ -73,15 +80,40 @@ def _load_template(agent_dir: str, template_name: str) -> str:
     if "phase1" in template_name:
         return (
             "Извлеки ключевые факты из этих сообщений:\n\n{conversations}\n\n"
-            "Ответь в JSON: {{\"facts\": [...], \"summary\": \"...\"}}"
+            'Ответь в JSON: {"facts": [...], "summary": "..."}'
         )
     return "Обнови wiki на основе этих фактов:\n\n{facts_json}"
+
+
+def _split_template(text: str) -> tuple[str | None, str]:
+    """Разделить шаблон на system-часть (cached) и user-часть (varies).
+
+    Возвращает (system, user). Если маркер отсутствует — (None, text),
+    что сохраняет старое поведение (всё идёт в user prompt).
+    """
+    if TEMPLATE_SPLIT_MARKER not in text:
+        return None, text
+    system_part, user_part = text.split(TEMPLATE_SPLIT_MARKER, 1)
+    return system_part.strip(), user_part.strip()
+
+
+def _substitute(template: str, **values: str) -> str:
+    """Безопасная подстановка плейсхолдеров: только переданные ключи.
+
+    В отличие от str.format(), не падает на литеральных `{` в JSON-примерах
+    или путях вроде `wiki/entities/{slug}.md` внутри шаблонов.
+    """
+    result = template
+    for key, value in values.items():
+        result = result.replace("{" + key + "}", value)
+    return result
 
 
 async def _call_claude_simple(
     prompt: str,
     model: str = "haiku",
     cwd: str | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Простой (не-агентный) вызов Claude для Phase 1."""
     options = ClaudeAgentOptions(
@@ -91,6 +123,8 @@ async def _call_claude_simple(
     )
     if cwd:
         options.cwd = cwd
+    if system_prompt:
+        options.system_prompt = system_prompt
 
     result_text = ""
     async for msg in query(prompt=prompt, options=options):
@@ -110,6 +144,7 @@ async def _call_claude_agent(
     model: str = "sonnet",
     cwd: str | None = None,
     allowed_tools: list[str] | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Агентный вызов Claude для Phase 2 (с tools)."""
     options = ClaudeAgentOptions(
@@ -121,6 +156,8 @@ async def _call_claude_agent(
         options.cwd = cwd
     if allowed_tools:
         options.allowed_tools = allowed_tools
+    if system_prompt:
+        options.system_prompt = system_prompt
 
     result_text = ""
     async for msg in query(prompt=prompt, options=options):
@@ -208,7 +245,9 @@ async def dream_cycle(
 
     # ── Phase 1: Извлечение фактов ──
     template1 = _load_template(agent_dir, "dream_phase1.md")
-    prompt1 = template1.format(
+    system1, user1_template = _split_template(template1)
+    prompt1 = _substitute(
+        user1_template,
         conversations=conversations_text,
         profile=profile_text,
         index=index_text,
@@ -216,7 +255,10 @@ async def dream_cycle(
 
     try:
         phase1_response = await _call_claude_simple(
-            prompt1, model=model_phase1, cwd=str(memory_path)
+            prompt1,
+            model=model_phase1,
+            cwd=str(memory_path),
+            system_prompt=system1,
         )
         result["phase1_ok"] = True
     except Exception as e:
@@ -244,7 +286,11 @@ async def dream_cycle(
 
     # ── Phase 2: Обновление wiki ──
     template2 = _load_template(agent_dir, "dream_phase2.md")
-    prompt2 = template2.format(facts_json=json.dumps(facts, ensure_ascii=False, indent=2))
+    system2, user2_template = _split_template(template2)
+    prompt2 = _substitute(
+        user2_template,
+        facts_json=json.dumps(facts, ensure_ascii=False, indent=2),
+    )
 
     try:
         await _call_claude_agent(
@@ -252,6 +298,7 @@ async def dream_cycle(
             model=model_phase2,
             cwd=str(memory_path),
             allowed_tools=["Read", "Write", "Edit", "Glob"],
+            system_prompt=system2,
         )
         result["phase2_ok"] = True
     except Exception as e:
