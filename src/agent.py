@@ -47,6 +47,30 @@ from .tool_hints import format_tool_hint
 logger = logging.getLogger(__name__)
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Рекурсивный merge двух dict'ов: overlay поверх base.
+
+    Правила:
+    - dict + dict → рекурсивный merge (новый dict)
+    - всё остальное (list, scalar, None) → overlay REPLACES base
+      (list не конкатенируется — позволяет overlay'ю полностью переопределить
+      список, например `allowed_users`, а не только дополнить)
+
+    Возвращает новый dict, исходные не мутирует.
+    """
+    result = dict(base)
+    for key, overlay_val in overlay.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(overlay_val, dict)
+        ):
+            result[key] = _deep_merge(result[key], overlay_val)
+        else:
+            result[key] = overlay_val
+    return result
+
+
 class Agent:
     def __init__(self, config_path: str):
         """
@@ -207,13 +231,45 @@ class Agent:
         logger.info(f"Agent '{self.name}' загружен из {config_path}")
 
     def _load_config(self) -> dict:
-        """Загрузить и обработать YAML конфиг с expandvars."""
+        """Загрузить и обработать YAML конфиг с expandvars.
+
+        Поверх tracked `agent.yaml` подмешивается untracked `agent.local.yaml`
+        (если существует рядом) — так юзерские правки (allowed_users, модель,
+        кастомный prompt) переживают `git pull`, а наши дефолты обновляются.
+        """
         with open(self.config_path, encoding="utf-8") as f:
             raw = f.read()
 
         # expandvars для секретов (${ME_BOT_TOKEN} → значение из .env)
         expanded = os.path.expandvars(raw)
-        return yaml.safe_load(expanded)
+        base = yaml.safe_load(expanded) or {}
+
+        local_path = self.config_path.parent / "agent.local.yaml"
+        if not local_path.exists():
+            return base
+
+        try:
+            with open(local_path, encoding="utf-8") as f:
+                local_raw = f.read()
+            local_expanded = os.path.expandvars(local_raw)
+            local_overlay = yaml.safe_load(local_expanded) or {}
+        except (OSError, yaml.YAMLError) as e:
+            logger.error(
+                f"Не удалось прочитать {local_path}: {e}. "
+                "Игнорирую overlay, использую только agent.yaml."
+            )
+            return base
+
+        if not isinstance(local_overlay, dict):
+            logger.error(
+                f"{local_path} должен быть YAML mapping (dict), получил "
+                f"{type(local_overlay).__name__}. Игнорирую overlay."
+            )
+            return base
+
+        merged = _deep_merge(base, local_overlay)
+        logger.info(f"Agent config: применён overlay из {local_path.name}")
+        return merged
 
     def _parse_allowed_users(self) -> list[int]:
         """Разобрать список allowed_users, преобразовать в int."""

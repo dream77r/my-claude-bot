@@ -18,6 +18,10 @@ agents/*/memory/
 agents/*/SOUL.md
 agents/*/HEARTBEAT.md
 agents/*/settings.json
+# Overlay для юзерских правок agent.yaml (allowed_users, модель и т.п.)
+agents/*/agent.local.yaml
+# Маркер успешной миграции конфигов в overlay (создаётся update.sh)
+.migrated_config_overlay
 
 # Внутренние планы разработки
 ROADMAP.md
