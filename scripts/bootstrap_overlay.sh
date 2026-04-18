@@ -29,13 +29,16 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null)" || {
     exit 1
 }
 
-echo -e "${BOLD}→ Stash локальных правок в agents/...${RESET}"
+echo -e "${BOLD}→ Stash локальных правок (весь working tree)...${RESET}"
+# Стешим ВСЁ, не только agents/ — у юзеров бывают правки в src/, update.sh
+# и т.п., которые тоже блокируют git pull. Конфликты при pop разрешаем в
+# пользу юзера (см. ниже).
 STASHED=0
-if git diff --quiet -- agents/ 2>/dev/null && \
-   [ -z "$(git ls-files --others --exclude-standard agents/)" ]; then
-    echo "  (нечего stash'ить — working tree чистый в agents/)"
+if git diff --quiet && git diff --cached --quiet && \
+   [ -z "$(git ls-files --others --exclude-standard)" ]; then
+    echo "  (нечего stash'ить — working tree чистый)"
 else
-    git stash push -u -m "pre-overlay-bootstrap-$(date +%s)" -- agents/ >/dev/null
+    git stash push -u -m "pre-overlay-bootstrap-$(date +%s)" >/dev/null
     STASHED=1
     echo -e "${GREEN}  ✓ stash сохранён${RESET}"
 fi
@@ -52,14 +55,20 @@ if [ "$STASHED" = "1" ]; then
         echo -e "${GREEN}  ✓ stash pop чисто${RESET}"
     else
         # Конфликт при 3-way merge stash'а поверх обновлённого дерева.
-        # Смысл bootstrap'а — СОХРАНИТЬ юзерские правки, чтобы миграция их
-        # подобрала. Форсим версию из stash на конфликтных файлах и дропаем
-        # stash (иначе он копится в списке).
-        git checkout 'stash@{0}' -- agents/ 2>/dev/null || true
-        # Индекс после conflict'а в состоянии "both modified" — сбросим.
-        git reset HEAD agents/ >/dev/null 2>&1 || true
+        # Смысл bootstrap'а — СОХРАНИТЬ юзерские правки (agent.yaml,
+        # src/*, что бы там ни было), чтобы миграция и юзер после дальше
+        # работали с ними. Находим конфликтные файлы и форсим stash'ную
+        # версию по всему дереву.
+        CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null)
+        if [ -n "$CONFLICTS" ]; then
+            echo "$CONFLICTS" | while read -r f; do
+                git checkout 'stash@{0}' -- "$f" 2>/dev/null || true
+            done
+            git reset HEAD -- $CONFLICTS >/dev/null 2>&1 || true
+            echo -e "${YELLOW}  ⚠ конфликт на: $(echo $CONFLICTS | tr '\n' ' ')${RESET}"
+            echo -e "${YELLOW}    разрешено в пользу твоих правок${RESET}"
+        fi
         git stash drop >/dev/null 2>&1 || true
-        echo -e "${YELLOW}  ⚠ был конфликт — разрешён в пользу твоих правок${RESET}"
     fi
 fi
 
