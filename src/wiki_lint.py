@@ -166,7 +166,7 @@ def lint_wiki(agent_dir: str) -> LintReport:
         page_names_lower[p.stem.lower()].append(p)
 
     graph_path = memory_path / "graph.json"
-    graph: dict = {"edges": []}
+    graph: dict = {"edges": [], "nodes": []}
     if graph_path.exists():
         try:
             graph = json.loads(graph_path.read_text(encoding="utf-8"))

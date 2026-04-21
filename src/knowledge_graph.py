@@ -272,10 +272,12 @@ def _load_graph(agent_dir: str) -> dict:
     graph_path = memory_path / GRAPH_FILE
     if graph_path.exists():
         try:
-            return json.loads(graph_path.read_text(encoding="utf-8"))
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            graph.setdefault("nodes", [])
+            return graph
         except (json.JSONDecodeError, OSError):
             pass
-    return {"edges": [], "updated": ""}
+    return {"edges": [], "nodes": [], "updated": ""}
 
 
 def _save_graph(agent_dir: str, graph: dict) -> None:
