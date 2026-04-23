@@ -147,3 +147,81 @@ class TestParseAllowedTools:
             yaml.dump(config, f)
         agent = Agent(str(yaml_path))
         assert agent._parse_allowed_tools() is None
+
+
+def _make_agent(tmp_path, *, role="worker", allowed_tools=None, sandbox=None):
+    """Минимальный Agent для тестов augment-логики."""
+    agent_dir = tmp_path / "agents" / "t"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "name": "t",
+        "bot_token": "1:A",
+        "role": role,
+        "claude_flags": (
+            ["--allowedTools", ",".join(allowed_tools)]
+            if allowed_tools is not None
+            else []
+        ),
+    }
+    if sandbox is not None:
+        config["sandbox"] = sandbox
+    yaml_path = agent_dir / "agent.yaml"
+    with open(yaml_path, "w") as f:
+        yaml.dump(config, f)
+    return Agent(str(yaml_path))
+
+
+class TestAugmentWorkerFileTools:
+    """Runtime-политика: worker с sandbox.enabled получает Bash+Edit."""
+
+    def test_worker_default_sandbox_gets_bash_and_edit(self, tmp_path):
+        # sandbox не задан → default для worker = True → augment работает
+        agent = _make_agent(
+            tmp_path, role="worker", allowed_tools=["Read", "Write", "Glob", "Grep"]
+        )
+        result = agent._augment_worker_file_tools(agent._parse_allowed_tools())
+        assert "Bash" in result
+        assert "Edit" in result
+        # оригинальные tools сохранены
+        assert {"Read", "Write", "Glob", "Grep"}.issubset(set(result))
+
+    def test_worker_already_has_bash_idempotent(self, tmp_path):
+        agent = _make_agent(
+            tmp_path,
+            role="worker",
+            allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        )
+        result = agent._augment_worker_file_tools(agent._parse_allowed_tools())
+        # Без дубликатов
+        assert result.count("Bash") == 1
+        assert result.count("Edit") == 1
+
+    def test_master_not_augmented(self, tmp_path):
+        agent = _make_agent(
+            tmp_path,
+            role="master",
+            allowed_tools=["Read", "Write"],
+            sandbox={"enabled": True},
+        )
+        result = agent._augment_worker_file_tools(agent._parse_allowed_tools())
+        # Master руками управляет своими tools, runtime не вмешивается
+        assert "Bash" not in result
+        assert "Edit" not in result
+
+    def test_sandbox_disabled_not_augmented(self, tmp_path):
+        # Worker явно выключил sandbox (как coder) → runtime не добавляет
+        # Bash за его спиной, автор конфига знал что делал.
+        agent = _make_agent(
+            tmp_path,
+            role="worker",
+            allowed_tools=["Read", "Write"],
+            sandbox={"enabled": False},
+        )
+        result = agent._augment_worker_file_tools(agent._parse_allowed_tools())
+        assert "Bash" not in result
+
+    def test_none_tools_preserved(self, tmp_path):
+        # Нет --allowedTools вообще → не наш случай, None пропускается
+        agent = _make_agent(tmp_path, role="worker", allowed_tools=None)
+        result = agent._augment_worker_file_tools(None)
+        assert result is None

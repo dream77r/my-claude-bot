@@ -945,6 +945,47 @@ class Agent:
                 return flags[i + 1].split(",")
         return None
 
+    # Минимум tools, которые нужны worker'у с sandbox'ом для работы с файлами
+    # в своей папке: Bash — для pdftoppm/ffmpeg/convert/unzip, Edit — для
+    # incremental wiki updates. Read/Write/Glob/Grep уже в любом разумном
+    # списке; если их нет — это намеренная урезка, не трогаем.
+    _WORKER_FILE_TOOLS: tuple[str, ...] = ("Bash", "Edit")
+
+    def _augment_worker_file_tools(
+        self, tools: list[str] | None
+    ) -> list[str] | None:
+        """
+        Гарантирует Bash+Edit в allowed_tools для не-master с sandbox.enabled.
+
+        Мотивация: sandbox (src/sandbox.py) уже ограничивает абсолютные пути
+        в Bash до agents/{name}/ + системного allowlist. Если worker задекларировал
+        sandbox.enabled — значит согласился на ограничение. Значит, безопасно
+        дать ему Bash/Edit без явного перечисления в yaml.
+
+        Это позволяет старым agent.yaml (написанным до этой политики) получать
+        фикс через обычный ./update.sh без мутации файлов пользователя и без
+        миграционных скриптов. Source of truth — шаблон нового агента
+        (src/agent_manager.py::AGENT_YAML_TEMPLATE), там Bash/Edit явно.
+        """
+        if self.is_master:
+            return tools
+        sandbox_enabled = self.config.get("sandbox", {}).get(
+            "enabled", not self.is_master
+        )
+        if not sandbox_enabled:
+            # Worker явно выключил sandbox — runtime не должен расширять
+            # его полномочия за спиной автора конфига.
+            return tools
+        if tools is None:
+            # Нет --allowedTools в claude_flags — не наш случай, пусть
+            # pre-existing логика ниже по стеку разбирается.
+            return tools
+        augmented = list(tools)
+        for needed in self._WORKER_FILE_TOOLS:
+            if needed not in augmented:
+                augmented.append(needed)
+        return augmented
+
     # Порог подряд-идущих ошибок, после которого сбрасываем session_id.
     # Битая сессия может отправлять каждый следующий вызов в ту же яму —
     # сброс даёт агенту чистый старт. Два — чтобы не реагировать на
@@ -1009,6 +1050,10 @@ class Agent:
 
         # Allowed tools
         allowed_tools = self._parse_allowed_tools()
+        # Worker с sandbox.enabled получает Bash+Edit автоматически — безопасно,
+        # scope уже ограничен agents/{name}/. Спасает старые yaml без Bash
+        # (апгрейд через ./update.sh без ручной миграции).
+        allowed_tools = self._augment_worker_file_tools(allowed_tools)
 
         # Добавить MCP tool names skill_marketplace если сервер подключён.
         # Без этого Claude CLI отклонит вызов: allowed_tools — whitelist.
