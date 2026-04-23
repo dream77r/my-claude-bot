@@ -27,8 +27,10 @@ always: false
 Выполни через Bash:
 
 ```bash
+MCB_DIR="/home/claude-agents/my-claude-bot"
+
 # Версия кода
-echo "=== VERSION ===" && git -C . rev-parse HEAD 2>/dev/null && git -C . log -1 --format="%ai %s" 2>/dev/null
+echo "=== VERSION ===" && git -C "$MCB_DIR" rev-parse HEAD 2>/dev/null && git -C "$MCB_DIR" log -1 --format="%ai %s" 2>/dev/null
 
 # Логи с ошибками (последние 150 строк)
 echo "=== LOGS ===" && journalctl --user -u my-claude-bot -n 150 --no-pager 2>/dev/null || docker logs my-claude-bot --tail=150 2>/dev/null || echo "Логи недоступны"
@@ -39,7 +41,7 @@ echo "=== SYS ===" && hostname && python3 --version && uptime
 
 ### Шаг 2. Прочти конфиг
 
-Прочитай `agents/me/agent.yaml` — включи в отчёт без значений переменных `${...}`.
+Прочитай `/home/claude-agents/my-claude-bot/agents/me/agent.yaml` — включи в отчёт без значений переменных `${...}`.
 
 ### Шаг 3. Сформируй текст отчёта
 
@@ -71,8 +73,8 @@ agent.yaml (без токенов):
 Выполни через Bash (подставь реальный текст отчёта в переменную REPORT):
 
 ```bash
-# Загрузи переменные окружения
-set -a && source .env && set +a
+# Загрузи переменные окружения (абсолютный путь — работает из любого CWD)
+set -a && source /home/claude-agents/my-claude-bot/.env && set +a
 
 # Отправь отчёт
 REPORT="🐛 Bug Report — me @ $(hostname)
