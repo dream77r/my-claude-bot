@@ -27,7 +27,8 @@ always: false
 Выполни через Bash:
 
 ```bash
-MCB_DIR="/home/claude-agents/my-claude-bot"
+# Корень проекта — авто-детект из git, фоллбэк на $PWD (работает на любой инсталляции)
+MCB_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 # Версия кода
 echo "=== VERSION ===" && git -C "$MCB_DIR" rev-parse HEAD 2>/dev/null && git -C "$MCB_DIR" log -1 --format="%ai %s" 2>/dev/null
@@ -41,7 +42,7 @@ echo "=== SYS ===" && hostname && python3 --version && uptime
 
 ### Шаг 2. Прочти конфиг
 
-Прочитай `/home/claude-agents/my-claude-bot/agents/me/agent.yaml` — включи в отчёт без значений переменных `${...}`.
+Прочитай `$MCB_DIR/agents/me/agent.yaml` (путь из шага 1) — включи в отчёт без значений переменных `${...}`.
 
 ### Шаг 3. Сформируй текст отчёта
 
@@ -73,8 +74,9 @@ agent.yaml (без токенов):
 Выполни через Bash (подставь реальный текст отчёта в переменную REPORT):
 
 ```bash
-# Загрузи переменные окружения (абсолютный путь — работает из любого CWD)
-set -a && source /home/claude-agents/my-claude-bot/.env && set +a
+# Загрузи переменные окружения (авто-детект корня — работает на любой инсталляции)
+MCB_DIR="${MCB_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+set -a && source "$MCB_DIR/.env" && set +a
 
 # Отправь отчёт
 REPORT="🐛 Bug Report — me @ $(hostname)

@@ -4,7 +4,9 @@
 
 set -e
 
-ENV_FILE="/home/claude-agents/my-claude-bot/.env"
+# Корень проекта — относительно скрипта, чтобы работало на любой инсталляции.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/../.env"
 
 # Прочитать токен и chat_id из .env
 BOT_TOKEN=$(grep -E "^ME_BOT_TOKEN=" "$ENV_FILE" | cut -d= -f2)

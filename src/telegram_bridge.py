@@ -867,7 +867,7 @@ class TelegramBridge:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
         """Перезапустить платформу. Systemd поднимет процесс заново."""
-        import sys
+        import signal
 
         await self._reply(
             update, context,
@@ -875,8 +875,14 @@ class TelegramBridge:
         )
         await asyncio.sleep(1)
         logger.info("Restart requested via Telegram")
-        # sys.exit(0) → systemd (user) видит что процесс завершился → перезапускает
-        sys.exit(0)
+        # SIGINT → asyncio.run переведёт в KeyboardInterrupt → graceful shutdown
+        # в async_main (flush git_committer, закрытие bridges). systemd Restart=always
+        # поднимет процесс заново. Fallback: если shutdown завис (напр. httpx pool
+        # timeout), через 15с добиваем os._exit, чтобы systemd гарантированно
+        # увидел завершение. sys.exit тут не работает — SystemExit проглатывается
+        # внутри handler-таски PTB и основной loop продолжает крутиться.
+        asyncio.get_running_loop().call_later(15.0, os._exit, 0)
+        os.kill(os.getpid(), signal.SIGINT)
 
     async def _cmd_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
