@@ -44,7 +44,7 @@ allowed_users:
 claude_model: "{model}"
 claude_flags:
   - "--allowedTools"
-  - "Read,Write,Glob,Grep,WebSearch,WebFetch"
+  - "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch"
   - "--output-format"
   - "text"
 
@@ -57,11 +57,13 @@ heartbeat:
   enabled: false
 
 # Sandbox: изоляция файловой системы и bash для worker-агентов.
-# enabled=true — блокирует Read/Write/Edit за пределами agents/{name}/.
-# bubblewrap=true — изолирует bash на уровне ядра (требует `sudo apt-get
-# install bubblewrap`). Новые агенты получают full sandbox по умолчанию —
-# это правильный default для custom/community-агентов, которым не нужен
-# доступ ко всей системе.
+# enabled=true — hook блокирует Read/Write/Edit и абсолютные пути в Bash
+# за пределами agents/{name}/ (системные /tmp /usr/bin /bin всегда ok).
+# bubblewrap=true — kernel-enforced изоляция bash (требует `sudo apt-get
+# install bubblewrap`; если не установлен — graceful degrade до hook-only).
+# Новые агенты получают full sandbox + Bash: PDF/изображения/архивы/аудио
+# обрабатываются прямо в своей memory/ через pdftoppm/ffmpeg/convert и т.п.,
+# не выходя за свою папку.
 sandbox:
   enabled: true
   bubblewrap: true

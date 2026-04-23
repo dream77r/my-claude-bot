@@ -50,6 +50,8 @@ All Mini App routes require `Authorization: tma <initData>` + `X-Origin-Agent: <
 
 **Skills.** `agents/{name}/skills/` holds installed skills (single `.md` or bundle dir with `SKILL.md`). `src/skill_pool.py` syncs the shared git-backed pool. Install/uninstall are hot — no restart. `src/mcp_skill_marketplace.py` exposes the same to agents via MCP.
 
+**Sandbox policy (workers).** Worker-агенты получают `Bash` + `Read/Write/Edit/Glob/Grep/WebSearch/WebFetch` в allowed_tools и работают с cwd=`agents/{name}/memory/`. Scope ограничен двумя слоями: (1) hook — `src/sandbox.py` как PreToolUse CLI-хук блокирует абсолютные пути вне `agents/{name}/` и `/tmp` `/usr/bin` `/bin` `/usr/lib` `/dev/null`; относительные пути всегда ok. (2) bubblewrap — kernel-enforced isolation для Bash (graceful degrade если `bwrap` не установлен). Оба включаются по умолчанию для новых агентов через `AGENT_YAML_TEMPLATE` в `src/agent_manager.py`. Легитимные исключения — `me` (master, unrestricted) и `coder` (trusted dev). Policy проверяется в `tests/test_agent_policy.py`. PDF/изображения/архивы/аудио обрабатываются прямо в своей memory/ через `pdftoppm`/`ffmpeg`/`convert`/`unzip` — они в `/usr/bin` (always-allowed).
+
 ## Deployment gotchas
 
 **Singleton lock.** `src/main.py::_acquire_singleton_lock` takes an `fcntl.flock` on `/tmp/my-claude-bot-<sha256-of-tokens>.lock`. If a second process starts with the same Telegram tokens (`docker compose up` on top of systemd, two systemd units, forgotten nohup), it exits immediately with the holder's PID — **don't remove or work around this lock**; it's what stops Telegram `Conflict: terminated by other getUpdates request` loops. systemd is the canonical deploy; Docker is local-dev only.
