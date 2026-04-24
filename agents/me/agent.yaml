@@ -39,15 +39,21 @@ claude_model_router: "haiku"
 claude_model_simple: "haiku"
 claude_flags:
   - "--allowedTools"
-  - "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Agent"
+  - "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Agent,mcp__brewos__*"
   - "--output-format"
   - "text"
 
 # MCP серверы (опционально)
 # Раскомментируй нужные и добавь токены в .env
-# MCP серверы
-# Раскомментируй нужные и добавь токены в .env
-mcp_servers: {}
+mcp_servers:
+  # BrewOS Analytics — read-only аналитика сети кофеен Lintu.
+  # 18 tools: выручка, смены, персонал, банк, поставщики, склад.
+  # Токен создаётся в https://app.brewos.ru/dashboard/settings?tab=agents
+  brewos:
+    type: http
+    url: https://api.brewos.ru/mcp
+    headers:
+      Authorization: "Bearer ${BREWOS_AGENT_TOKEN}"
   # Todoist — задачи и проекты (добавь TODOIST_API_TOKEN в .env)
   # todoist:
   #   command: "npx"
