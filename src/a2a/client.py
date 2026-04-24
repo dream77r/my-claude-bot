@@ -18,7 +18,13 @@ import uuid
 from dataclasses import dataclass
 
 import httpx
-from a2a.types import AgentCard, Message, Part, Role, TextPart
+
+# a2a-sdk 1.0 переписал `a2a.types` на protobuf. Pydantic-типы, на которых
+# держится этот модуль (wire-format JSON-RPC message/send), остались в
+# `a2a.compat.v0_3.types` — это официальный миграционный слой. Если он
+# когда-нибудь уедет, переписать модуль на core protobuf API, но до тех
+# пор compat даёт и корректность, и стабильность.
+from a2a.compat.v0_3.types import AgentCard, Message, Part, Role, TextPart
 
 logger = logging.getLogger(__name__)
 

@@ -24,7 +24,10 @@ import os
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from a2a.types import Message, Part, Role, TextPart
+# a2a-sdk 1.0: pydantic-типы переехали в compat.v0_3 (core переписан на
+# protobuf). Парсим/сериализуем wire-формат A2A JSON-RPC через compat —
+# это официальный миграционный слой.
+from a2a.compat.v0_3.types import Message, Part, Role, TextPart
 from fastapi import APIRouter, Header, HTTPException, Request, status
 
 from ..bus import FleetMessage, MessageType

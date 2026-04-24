@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from a2a.types import AgentCard
+# a2a-sdk 1.0: AgentCard pydantic-модель живёт в compat.v0_3; cards.py
+# строит карточку из этого же слоя — тест должен сравнивать с ним.
+from a2a.compat.v0_3.types import AgentCard
 from fastapi.testclient import TestClient
 
 from src.a2a.cards import build_agent_card

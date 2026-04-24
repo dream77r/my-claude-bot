@@ -18,7 +18,10 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from a2a.types import (
+# a2a-sdk 1.0: pydantic AgentCard + nested модели живут в compat.v0_3
+# (core переписан на protobuf). AgentCard специально строится для JSON-
+# сериализации по спеке — compat даёт правильный camelCase через by_alias.
+from a2a.compat.v0_3.types import (
     AgentCapabilities,
     AgentCard,
     AgentProvider,
