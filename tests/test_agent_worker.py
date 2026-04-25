@@ -292,13 +292,18 @@ class TestMidTurnInjection:
                 pass
 
     @pytest.mark.asyncio
-    async def test_followup_survives_turn_error(self, worker, bus):
-        """Если turn упал с ошибкой — pending follow-ups всё равно публикуются."""
+    async def test_followups_dropped_on_turn_error(self, worker, bus):
+        """Если turn упал с ошибкой — pending follow-ups дропаются с уведомлением.
+
+        Регрессия на петлю каждые 10 минут: раньше merged follow-ups
+        ре-публиковались как новый turn после timeout/error, и бот
+        гарантированно зацикливался на той же битой сессии. Теперь — drop
+        + сообщение юзеру, чтобы он сам решил, что повторять.
+        """
         bus.subscribe("telegram:test")
         bus.subscribe("agent:test")
         worker.agent.call_claude = AsyncMock(side_effect=RuntimeError("boom"))
 
-        # Пред-заряжаем pending followup, эмулируя что он пришёл во время turn
         followup = FleetMessage(
             source="telegram:123",
             target="agent:test",
@@ -315,13 +320,53 @@ class TestMidTurnInjection:
         )
         await worker._handle_message(msg)
 
-        # Coalesced follow-up должен оказаться в очереди agent:test
-        delivered = []
-        q = bus._queues["agent:test"]
-        while not q.empty():
-            delivered.append(q.get_nowait())
+        # Follow-up НЕ должен оказаться в очереди agent:test —
+        # цикл "ошибка → re-trigger → снова ошибка" разорван.
+        agent_q = bus._queues["agent:test"]
+        agent_delivered = []
+        while not agent_q.empty():
+            agent_delivered.append(agent_q.get_nowait())
+        assert not any(m.content == "next question" for m in agent_delivered)
 
-        assert any(m.content == "next question" for m in delivered)
+        # Юзер должен увидеть уведомление, что N сообщений пропущено.
+        tg_q = bus._queues["telegram:test"]
+        tg_delivered = []
+        while not tg_q.empty():
+            tg_delivered.append(tg_q.get_nowait())
+        notify = [
+            m for m in tg_delivered
+            if m.metadata.get("event") == "followups_dropped"
+        ]
+        assert len(notify) == 1
+        assert notify[0].metadata["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_followups_dropped_on_timeout(self, worker, bus):
+        """Та же защита от петли при asyncio.TimeoutError из call_claude."""
+        bus.subscribe("telegram:test")
+        bus.subscribe("agent:test")
+        worker.agent.call_claude = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        worker._pending_followups[123] = [
+            FleetMessage(
+                source="telegram:123",
+                target="agent:test",
+                content="late question",
+                chat_id=123,
+            )
+        ]
+
+        await worker._handle_message(FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="initial",
+            chat_id=123,
+        ))
+
+        agent_q = bus._queues["agent:test"]
+        while not agent_q.empty():
+            msg_out = agent_q.get_nowait()
+            assert msg_out.content != "late question"
 
     @pytest.mark.asyncio
     async def test_finally_does_not_evict_successor(self, worker, bus):

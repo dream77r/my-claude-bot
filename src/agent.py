@@ -107,6 +107,14 @@ class Agent:
         self.claude_model_simple: str = self.config.get("claude_model_simple", "haiku")
         self.claude_flags: list[str] = self.config.get("claude_flags", [])
         self.mcp_servers: dict = self.config.get("mcp_servers", {})
+        # Жёсткий cap на один turn. Включает все continuation/recovery
+        # внутри _do_query, но НЕ включает ожидание глобального семафора.
+        # Поднят с 600 → 1200, потому что агенты с файловой работой
+        # (Excel, кодогенерация) регулярно упирались в 10 минут и юзер
+        # видел "Ответ занял слишком долго". Конфигурируется в agent.yaml.
+        self.call_timeout_seconds: int = int(
+            self.config.get("call_timeout_seconds", 1200)
+        )
 
         # Skill Marketplace MCP — автоматически монтируется всем воркерам.
         # Даёт право самостоятельно устанавливать скиллы из пула (без создания).
@@ -1320,8 +1328,29 @@ class Agent:
 
             return result_text or "Не удалось получить ответ."
 
+        # Семафор удерживается снаружи wait_for: ожидание свободного
+        # слота не должно съедать turn-бюджет. Сам turn ограничен
+        # call_timeout_seconds (default 1200с, конфиг в agent.yaml).
+        async def _do_query_with_timeout() -> str:
+            try:
+                return await asyncio.wait_for(
+                    _do_query(), timeout=self.call_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                # Битая сессия после таймаута содержит висящие tool-результаты;
+                # без сброса они переедут в следующий turn по --resume и
+                # утянут его в ту же яму. Логика та же, что для других
+                # пользовательских ошибок — инкрементим счётчик и при
+                # пороге чистим session_id для этого effective_dir.
+                logger.warning(
+                    f"Agent '{self.name}': turn timeout после "
+                    f"{self.call_timeout_seconds}с (effective_dir={effective_dir})"
+                )
+                self._on_user_visible_error(effective_dir)
+                raise
+
         if sem:
             async with sem:
-                return await asyncio.wait_for(_do_query(), timeout=600)
+                return await _do_query_with_timeout()
         else:
-            return await asyncio.wait_for(_do_query(), timeout=600)
+            return await _do_query_with_timeout()

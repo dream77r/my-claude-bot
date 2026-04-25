@@ -181,6 +181,12 @@ class AgentWorker:
             metadata={**base_meta, "event": "processing_started"},
         ))
 
+        # Если turn упадёт по таймауту/ошибке — НЕ склеивать накопленные
+        # follow-ups в новый turn. Иначе бот гарантированно зайдёт на
+        # второй круг с раздутым промптом и снова упрётся в timeout
+        # ("петля каждые 10 минут"). Юзер получит уведомление, что N
+        # сообщений пропущено, и сможет переслать главное.
+        drop_followups = False
         try:
             # Колбек для tool hints — пересылаем через bus
             async def on_tool_use(hint: str):
@@ -240,8 +246,10 @@ class AgentWorker:
             ))
 
         except asyncio.CancelledError:
+            drop_followups = True
             logger.info(f"Task cancelled for chat {chat_id}")
         except asyncio.TimeoutError:
+            drop_followups = True
             await self.bus.publish(FleetMessage(
                 source=f"agent:{self.agent.name}",
                 target=f"telegram:{self.agent.name}",
@@ -251,6 +259,7 @@ class AgentWorker:
                 metadata={**base_meta, "event": "error", "error": "timeout"},
             ))
         except Exception as e:
+            drop_followups = True
             logger.error(f"AgentWorker handle error: {e}")
             await self.bus.publish(FleetMessage(
                 source=f"agent:{self.agent.name}",
@@ -274,7 +283,37 @@ class AgentWorker:
             # положит снова в буфер.
             if chat_id:
                 followups = self._pending_followups.pop(chat_id, None)
-                if followups:
+                if followups and drop_followups:
+                    # Turn упал — публиковать merged-промпт нельзя:
+                    # с битой сессией он снова уйдёт в timeout, и так по
+                    # кругу. Сообщим юзеру, чтобы он решил, что повторять.
+                    logger.info(
+                        f"Mid-turn: drop {len(followups)} follow-up(ов) для "
+                        f"chat={chat_id} после неуспешного turn"
+                    )
+                    try:
+                        await self.bus.publish(FleetMessage(
+                            source=f"agent:{self.agent.name}",
+                            target=f"telegram:{self.agent.name}",
+                            content=(
+                                f"⚠️ Не учёл {len(followups)} сообщени"
+                                f"{'е' if len(followups) == 1 else 'я'}, "
+                                f"которое ты прислал, пока я думал. "
+                                f"Перешли главное ещё раз."
+                            ),
+                            msg_type=MessageType.OUTBOUND,
+                            chat_id=chat_id,
+                            metadata={
+                                **base_meta,
+                                "event": "followups_dropped",
+                                "count": len(followups),
+                            },
+                        ))
+                    except Exception as e:
+                        logger.error(
+                            f"followups_dropped notify failed chat={chat_id}: {e}"
+                        )
+                elif followups:
                     merged = self._coalesce_followups(followups)
                     logger.info(
                         f"Mid-turn: публикую coalesced follow-up для "
