@@ -368,6 +368,100 @@ class TestMidTurnInjection:
             msg_out = agent_q.get_nowait()
             assert msg_out.content != "late question"
 
+
+class TestPartialRescue:
+    """Партиал-result отдаётся юзеру при таймауте/ошибке вместо потери работы."""
+
+    @pytest.mark.asyncio
+    async def test_partial_text_delivered_on_timeout(self, worker, bus):
+        """on_text_delta накопил текст → TimeoutError → юзер видит партиал."""
+        bus.subscribe("telegram:test")
+
+        # call_claude эмулирует поток: сначала несколько on_text_delta,
+        # потом TimeoutError.
+        async def fake_call(message, files, sem, on_tool_use=None,
+                            on_text_delta=None, **kwargs):
+            await on_text_delta("Начинаю отвечать на твой вопрос про ")
+            await on_text_delta("Начинаю отвечать на твой вопрос про Python: переменные...")
+            raise asyncio.TimeoutError()
+
+        worker.agent.call_claude = fake_call
+
+        await worker._handle_message(FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="расскажи про python",
+            chat_id=123,
+        ))
+
+        msgs = []
+        while not bus._queues["telegram:test"].empty():
+            msgs.append(bus._queues["telegram:test"].get_nowait())
+
+        outbound = [m for m in msgs if m.msg_type == MessageType.OUTBOUND]
+        assert len(outbound) == 1, "должен быть ровно один OUTBOUND-ответ"
+
+        delivered = outbound[0]
+        # Партиал внутри ответа
+        assert "Python: переменные" in delivered.content
+        # Пометка об обрыве
+        assert "обрезан по таймауту" in delivered.content
+        # Метаданные показывают, что это truncated
+        assert delivered.metadata.get("truncated") is True
+        assert delivered.metadata.get("reason") == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_no_partial_falls_back_to_error_message(self, worker, bus):
+        """Если on_text_delta не вызывался — старое поведение, error message."""
+        bus.subscribe("telegram:test")
+        worker.agent.call_claude = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        await worker._handle_message(FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="hi",
+            chat_id=123,
+        ))
+
+        msgs = []
+        while not bus._queues["telegram:test"].empty():
+            msgs.append(bus._queues["telegram:test"].get_nowait())
+
+        outbound = [m for m in msgs if m.msg_type == MessageType.OUTBOUND]
+        assert len(outbound) == 1
+        assert "слишком долго" in outbound[0].content
+        assert outbound[0].metadata.get("event") == "error"
+
+    @pytest.mark.asyncio
+    async def test_partial_text_delivered_on_exception(self, worker, bus):
+        """Partial-rescue работает и при обычном Exception, не только TimeoutError."""
+        bus.subscribe("telegram:test")
+
+        async def fake_call(message, files, sem, on_tool_use=None,
+                            on_text_delta=None, **kwargs):
+            await on_text_delta("Половина ответа уже готова")
+            raise RuntimeError("connection reset")
+
+        worker.agent.call_claude = fake_call
+
+        await worker._handle_message(FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="q",
+            chat_id=123,
+        ))
+
+        msgs = []
+        while not bus._queues["telegram:test"].empty():
+            msgs.append(bus._queues["telegram:test"].get_nowait())
+
+        outbound = [m for m in msgs if m.msg_type == MessageType.OUTBOUND]
+        assert len(outbound) == 1
+        assert "Половина ответа уже готова" in outbound[0].content
+        assert "прервался ошибкой" in outbound[0].content
+        assert outbound[0].metadata.get("truncated") is True
+        assert outbound[0].metadata.get("reason") == "error"
+
     @pytest.mark.asyncio
     async def test_finally_does_not_evict_successor(self, worker, bus):
         """Identity-check: finally старой задачи не должен удалять новую запись.

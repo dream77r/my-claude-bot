@@ -187,6 +187,12 @@ class AgentWorker:
         # ("петля каждые 10 минут"). Юзер получит уведомление, что N
         # сообщений пропущено, и сможет переслать главное.
         drop_followups = False
+
+        # Partial-rescue: всё, что Claude уже надиктовал до таймаута,
+        # копится здесь через on_text_delta. При TimeoutError/Exception
+        # отдаём partial как обычный ответ с пометкой об обрыве — юзер
+        # не теряет работу модели, выполненную до момента падения.
+        partial_text = ""
         try:
             # Колбек для tool hints — пересылаем через bus
             async def on_tool_use(hint: str):
@@ -201,6 +207,8 @@ class AgentWorker:
 
             # Колбек для streaming текста
             async def on_text_delta(accumulated_text: str):
+                nonlocal partial_text
+                partial_text = accumulated_text
                 await self.bus.publish(FleetMessage(
                     source=f"agent:{self.agent.name}",
                     target=f"telegram:{self.agent.name}",
@@ -250,25 +258,74 @@ class AgentWorker:
             logger.info(f"Task cancelled for chat {chat_id}")
         except asyncio.TimeoutError:
             drop_followups = True
-            await self.bus.publish(FleetMessage(
-                source=f"agent:{self.agent.name}",
-                target=f"telegram:{self.agent.name}",
-                content="Ответ занял слишком долго. Попробуй переформулировать.",
-                msg_type=MessageType.OUTBOUND,
-                chat_id=chat_id,
-                metadata={**base_meta, "event": "error", "error": "timeout"},
-            ))
+            if partial_text:
+                # Отдаём то, что модель успела надиктовать до таймаута,
+                # с пометкой об обрыве. Лучше, чем потерять работу.
+                logger.info(
+                    f"Partial-rescue по timeout для chat={chat_id}: "
+                    f"{len(partial_text)} символов"
+                )
+                await self.bus.publish(FleetMessage(
+                    source=f"agent:{self.agent.name}",
+                    target=f"telegram:{self.agent.name}",
+                    content=(
+                        f"{partial_text}\n\n"
+                        f"⏱ Ответ обрезан по таймауту. "
+                        f"Напиши «продолжи», если нужно дописать."
+                    ),
+                    msg_type=MessageType.OUTBOUND,
+                    chat_id=chat_id,
+                    metadata={
+                        **base_meta,
+                        "event": "response",
+                        "truncated": True,
+                        "reason": "timeout",
+                    },
+                ))
+            else:
+                await self.bus.publish(FleetMessage(
+                    source=f"agent:{self.agent.name}",
+                    target=f"telegram:{self.agent.name}",
+                    content="Ответ занял слишком долго. Попробуй переформулировать.",
+                    msg_type=MessageType.OUTBOUND,
+                    chat_id=chat_id,
+                    metadata={**base_meta, "event": "error", "error": "timeout"},
+                ))
         except Exception as e:
             drop_followups = True
             logger.error(f"AgentWorker handle error: {e}")
-            await self.bus.publish(FleetMessage(
-                source=f"agent:{self.agent.name}",
-                target=f"telegram:{self.agent.name}",
-                content="Произошла ошибка. Попробуй ещё раз.",
-                msg_type=MessageType.OUTBOUND,
-                chat_id=chat_id,
-                metadata={**base_meta, "event": "error", "error": str(e)},
-            ))
+            if partial_text:
+                logger.info(
+                    f"Partial-rescue по error для chat={chat_id}: "
+                    f"{len(partial_text)} символов ({type(e).__name__})"
+                )
+                await self.bus.publish(FleetMessage(
+                    source=f"agent:{self.agent.name}",
+                    target=f"telegram:{self.agent.name}",
+                    content=(
+                        f"{partial_text}\n\n"
+                        f"⚠️ Ответ прервался ошибкой ({type(e).__name__}). "
+                        f"Напиши «продолжи», если нужно дописать."
+                    ),
+                    msg_type=MessageType.OUTBOUND,
+                    chat_id=chat_id,
+                    metadata={
+                        **base_meta,
+                        "event": "response",
+                        "truncated": True,
+                        "reason": "error",
+                        "error": str(e),
+                    },
+                ))
+            else:
+                await self.bus.publish(FleetMessage(
+                    source=f"agent:{self.agent.name}",
+                    target=f"telegram:{self.agent.name}",
+                    content="Произошла ошибка. Попробуй ещё раз.",
+                    msg_type=MessageType.OUTBOUND,
+                    chat_id=chat_id,
+                    metadata={**base_meta, "event": "error", "error": str(e)},
+                ))
         finally:
             # Identity check: pop только если в словаре всё ещё наша задача.
             # Иначе мы могли бы удалить только что созданный task-преемник.

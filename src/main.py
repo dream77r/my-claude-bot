@@ -780,6 +780,15 @@ async def async_main() -> None:
     tasks.append(github_sync_task)
     logger.info("GitHub Sync loop запущен: ежедневно в 03:00 UTC")
 
+    # ── AutoCompact (фоновое сжатие контекста в простое) ──
+    # Дополняет post-turn consolidation: ловит idle-окна между turn'ами
+    # и жмёт накопленный контекст, чтобы следующий turn стартовал
+    # лёгким. Inspired by nanobot HKUDS двухуровневый AutoCompact.
+    from .auto_compact import auto_compact_loop
+    auto_compact_task = asyncio.create_task(auto_compact_loop(runtime))
+    tasks.append(auto_compact_task)
+    logger.info("AutoCompact loop запущен (idle compaction каждые 5 мин)")
+
     # ── HTTP sidecar (Mini App + A2A) ──
     # Не запускается если HTTP_PORT пуст/0. Логирует свой статус сам.
     http_task = asyncio.create_task(http_serve_forever(runtime))
