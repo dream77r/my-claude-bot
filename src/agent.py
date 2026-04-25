@@ -1217,6 +1217,12 @@ class Agent:
                     result_text = msg.result
                 if msg.stop_reason:
                     stop_reason = msg.stop_reason
+                # Token-budget tracking: реальный размер контекста от
+                # Anthropic. Consolidator использует это как третий триггер
+                # для needs_consolidation() — точнее, чем наша оценка
+                # max_chars. См. consolidator.update_token_usage().
+                if self.consolidator and msg.usage:
+                    self.consolidator.update_token_usage(msg.usage)
             return result_text, new_session_id, stop_reason
 
         # Максимум попыток длинного ответа: если модель упирается в лимит
