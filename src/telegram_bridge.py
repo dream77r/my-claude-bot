@@ -2632,10 +2632,31 @@ class TelegramBridge:
         if thread_id:
             self._thread_ids[chat_id] = thread_id
 
-        # Добавить имя отправителя (важно для групп)
+        # Добавить имя отправителя (важно для групп).
+        # Если сообщение — reply на сообщение бота, добавить контекст цитаты,
+        # чтобы агент понимал на что отвечает.
         if is_group:
             sender_name = self._get_sender_name(update)
-            text = f"[{sender_name}]: {text}"
+            msg = update.message
+            reply = msg.reply_to_message if msg else None
+            if (
+                reply
+                and reply.from_user
+                and reply.from_user.id == context.bot.id
+            ):
+                original = (reply.text or reply.caption or "").strip()
+                if original:
+                    MAX_QUOTE = 100
+                    quote = (
+                        original[:MAX_QUOTE].rstrip() + "…"
+                        if len(original) > MAX_QUOTE
+                        else original
+                    )
+                    text = f"[{sender_name}] ↩️ «{quote}»:\n{text}"
+                else:
+                    text = f"[{sender_name}] ↩️ (ответил на сообщение бота):\n{text}"
+            else:
+                text = f"[{sender_name}]: {text}"
 
         # Early persist — сохраняем до буферизации/LLM-вызова.
         # Если процесс упадёт в буфере или в середине call_claude — сообщение
