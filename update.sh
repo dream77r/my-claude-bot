@@ -165,6 +165,25 @@ if [ ! -f .migrated_config_overlay ] && [ -n "$REMOTE" ] && \
     fi
 fi
 
+# ══════════════════════════════════════════
+# Одноразовая миграция SOUL.md: убрать literal-following "молчи"
+# ══════════════════════════════════════════
+# В старом шаблоне team-агента была инструкция «В остальных случаях —
+# молчи», которую LLM воспринимал буквально и слал слово «молчу» в чат
+# вместо реального молчания. Скрипт находит SOUL.md с этим паттерном и
+# заменяет блок на корректную формулировку (бридж сам фильтрует —
+# агенту не нужно перепроверять @-упоминание). Идемпотентно через маркер.
+if [ ! -f .migrated_soul_mute ] && [ -x scripts/migrate_soul_mute.sh ]; then
+    echo ""
+    echo -e "${BOLD}Migrating SOUL.md (mute literal-following fix)...${RESET}"
+    if scripts/migrate_soul_mute.sh; then
+        touch .migrated_soul_mute
+        echo -e "${GREEN}  ✓ SOUL mute migration done${RESET}"
+    else
+        echo -e "${YELLOW}  ⚠ SOUL migration reported errors; попробую снова при следующем ./update.sh${RESET}"
+    fi
+fi
+
 if [ -z "$REMOTE" ]; then
     echo -e "${RED}  ✗ Cannot reach remote 'origin/${BRANCH}'${RESET}"
     echo "  Check your internet connection or remote URL:"

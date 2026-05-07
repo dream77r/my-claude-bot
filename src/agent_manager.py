@@ -136,6 +136,7 @@ class AgentManager:
         model: str = "sonnet",
         soul_md: str | None = None,
         allowed_users: list[int] | None = None,
+        soul_template: str | None = None,
     ) -> Path:
         """
         Создать всю структуру агента + записать токен в .env.
@@ -148,6 +149,9 @@ class AgentManager:
             model: модель Claude (haiku/sonnet/opus)
             soul_md: кастомный SOUL.md (если None — используется шаблон)
             allowed_users: список Telegram user ID (если None — только FOUNDER)
+            soul_template: имя шаблона из templates/souls/<name>.md (например
+                "team", "advisor"). Используется если soul_md не задан.
+                Если шаблон не найден — fallback на встроенный SOUL_MD_TEMPLATE.
 
         Returns:
             Path к созданной директории агента
@@ -201,14 +205,29 @@ class AgentManager:
         (agent_dir / "agent.yaml").write_text(yaml_content, encoding="utf-8")
 
         # Записать SOUL.md
-        if soul_md:
-            (agent_dir / "SOUL.md").write_text(soul_md, encoding="utf-8")
-        else:
+        # Приоритет: явно переданный soul_md → templates/souls/{soul_template}.md
+        # → встроенный SOUL_MD_TEMPLATE.
+        soul_content = soul_md
+        if soul_content is None and soul_template:
+            template_path = (
+                self.root / "templates" / "souls" / f"{soul_template}.md"
+            )
+            if template_path.exists():
+                # Шаблоны хранятся как готовый markdown без плейсхолдеров.
+                # Если в будущем добавим формат-строки — вызывать
+                # template_path.read_text().format(...) с try/except.
+                soul_content = template_path.read_text(encoding="utf-8")
+            else:
+                logger.warning(
+                    f"SOUL template '{soul_template}' не найден в "
+                    f"{template_path} — fallback на встроенный шаблон"
+                )
+        if soul_content is None:
             soul_content = SOUL_MD_TEMPLATE.format(
                 display_name=display_name,
                 description=description,
             )
-            (agent_dir / "SOUL.md").write_text(soul_content, encoding="utf-8")
+        (agent_dir / "SOUL.md").write_text(soul_content, encoding="utf-8")
 
         # Добавить токен в .env
         self._add_env_var(env_var, bot_token)

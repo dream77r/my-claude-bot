@@ -22,6 +22,10 @@ agents/*/settings.json
 agents/*/agent.local.yaml
 # Маркер успешной миграции конфигов в overlay (создаётся update.sh)
 .migrated_config_overlay
+# Маркер миграции SOUL.md от опасной инструкции "молчи" (создаётся update.sh)
+.migrated_soul_mute
+# Бэкапы SOUL.md от миграции (рядом с оригиналом)
+agents/*/*.pre-mute-fix.bak
 
 # Внутренние планы разработки
 ROADMAP.md
