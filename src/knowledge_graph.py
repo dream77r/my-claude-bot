@@ -1374,8 +1374,12 @@ async def nightly_graph_loop(
             )
             await asyncio.sleep(sleep_seconds)
 
-            # Запустить пайплайн
-            result = await nightly_graph_cycle(agent_dir, config)
+            # Запустить пайплайн за ВЧЕРАШНИЙ день — тот, что только что
+            # закончился. Если передавать `datetime.now()` в 01:00 UTC,
+            # daily-note за свежий день ещё пуст, и L1/L2 каждый раз
+            # возвращают entities=[], links=[] (пустой результат).
+            yesterday = datetime.now() - timedelta(days=1)
+            result = await nightly_graph_cycle(agent_dir, config, date=yesterday)
             logger.info(f"KG nightly result: {result}")
 
         except asyncio.CancelledError:

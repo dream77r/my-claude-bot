@@ -1,5 +1,6 @@
 """Тесты для Knowledge Graph — 3-уровневый граф связей памяти."""
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ from src.knowledge_graph import (
     get_related_by_graph,
     link_daily_entities,
     nightly_graph_cycle,
+    nightly_graph_loop,
     should_run_synthesis,
     summarize_day,
     synthesize_graph,
@@ -700,6 +702,46 @@ class TestNightlyCycle:
                 })
 
         assert result["level3_skipped"] is True
+
+    @pytest.mark.asyncio
+    async def test_nightly_loop_passes_yesterday(self, agent_dir):
+        """Регрессия: nightly_graph_loop передаёт дату ВЧЕРА в cycle.
+
+        Why: цикл стартует в 01:00 UTC. Если передавать `datetime.now()`,
+        daily-note за свежий день ещё пуст → L1/L2 каждый раз
+        возвращают entities=[], links=[]. Баг наблюдался 7+ дней подряд
+        в проде до фикса.
+        """
+        captured: dict = {}
+
+        async def fake_cycle(agent_dir_arg, config_arg, date=None):
+            captured["date"] = date
+            raise asyncio.CancelledError()
+
+        async def instant_sleep(_seconds):
+            return None
+
+        with patch(
+            "src.knowledge_graph.nightly_graph_cycle",
+            side_effect=fake_cycle,
+        ), patch(
+            "src.knowledge_graph.asyncio.sleep",
+            side_effect=instant_sleep,
+        ), patch(
+            "src.knowledge_graph.maybe_backfill",
+            new_callable=AsyncMock,
+            return_value={"skipped": True},
+        ):
+            try:
+                await nightly_graph_loop(agent_dir)
+            except asyncio.CancelledError:
+                pass
+
+        assert captured.get("date") is not None, "cycle не получил date"
+        expected = (datetime.now() - timedelta(days=1)).date()
+        assert captured["date"].date() == expected, (
+            f"Ожидалась вчерашняя дата {expected}, получено {captured['date']}"
+        )
 
 
 # ── Тесты edge cases ──
