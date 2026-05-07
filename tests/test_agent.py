@@ -133,6 +133,31 @@ class TestBuildSystemPrompt:
         assert "Фаундер стартапа" in prompt
 
 
+class TestBuildGroupSystemPrompt:
+    """Регрессии для build_group_system_prompt — раздела «Режим группового
+    чата», который накладывается поверх SOUL/skill в групповых тредах."""
+
+    def test_includes_group_section(self, agent):
+        prompt = agent.build_group_system_prompt(chat_id=-100123)
+        assert "## Режим группового чата" in prompt
+
+    def test_no_literal_following_directives(self, agent):
+        """LLM-ловушка: фраза «Отвечай только когда обращаются» провоцировала
+        модель писать «(нет @упоминания — молчу)» вместо реального молчания.
+        Бридж сам фильтрует входящие — этот текст в промпте быть не должен."""
+        prompt = agent.build_group_system_prompt(chat_id=-100123)
+        assert "Отвечай только когда" not in prompt
+        # «молчу» допустимо ТОЛЬКО внутри явного запрета писать это слово.
+        # Проверяем что в промпте есть anti-instruction.
+        assert "не пиши" in prompt and "молчу" in prompt
+
+    def test_explains_bridge_filtering(self, agent):
+        """Промпт должен явно сообщить агенту: turn пришёл = его уже
+        позвали (mention/reply/cron), не нужно перепроверять @ в тексте."""
+        prompt = agent.build_group_system_prompt(chat_id=-100123)
+        assert "бридж" in prompt.lower()
+
+
 class TestParseAllowedTools:
     def test_parses_tools(self, agent):
         tools = agent._parse_allowed_tools()

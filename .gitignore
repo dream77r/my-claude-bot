@@ -24,6 +24,8 @@ agents/*/agent.local.yaml
 .migrated_config_overlay
 # Маркер миграции SOUL.md от опасной инструкции "молчи" (создаётся update.sh)
 .migrated_soul_mute
+# Маркер миграции сброса group session_id (создаётся update.sh)
+.migrated_clear_group_sessions
 # Бэкапы SOUL.md от миграции (рядом с оригиналом)
 agents/*/*.pre-mute-fix.bak
 

@@ -184,6 +184,27 @@ if [ ! -f .migrated_soul_mute ] && [ -x scripts/migrate_soul_mute.sh ]; then
     fi
 fi
 
+# ══════════════════════════════════════════
+# Одноразовая миграция: сброс Claude session_id для групповых агентов
+# ══════════════════════════════════════════
+# Дополнение к фиксу literal-following: помимо текста промпта (SOUL/skill),
+# был такой же паттерн «отвечай только когда обращаются» в hardcoded
+# group_instructions (src/agent.py). После починки промпта старые сессии
+# могут продолжать тащить few-shot «молчу». Сбрасываем session_id у всех
+# агентов, у кого есть group context — следующий turn начнётся с чистого
+# листа. Memory (log/wiki/daily) не трогается.
+if [ ! -f .migrated_clear_group_sessions ] && \
+   [ -x scripts/migrate_clear_group_sessions.sh ]; then
+    echo ""
+    echo -e "${BOLD}Clearing stale group session IDs...${RESET}"
+    if scripts/migrate_clear_group_sessions.sh; then
+        touch .migrated_clear_group_sessions
+        echo -e "${GREEN}  ✓ group session reset done${RESET}"
+    else
+        echo -e "${YELLOW}  ⚠ session reset reported errors; попробую снова при следующем ./update.sh${RESET}"
+    fi
+fi
+
 if [ -z "$REMOTE" ]; then
     echo -e "${RED}  ✗ Cannot reach remote 'origin/${BRANCH}'${RESET}"
     echo "  Check your internet connection or remote URL:"
