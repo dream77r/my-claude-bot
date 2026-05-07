@@ -152,6 +152,11 @@ class Agent:
         # session-state перестаёт заражать следующие попытки.
         self._consecutive_errors: dict[str, int] = {}
 
+        # Дедуп warning'ов о скиллах с ждущими файлами памяти —
+        # чтобы один и тот же warning не сыпался на каждом turn'е.
+        # Ключ: (skill_name, tuple(missing_files)).
+        self._skill_memory_warned: set[tuple[str, tuple[str, ...]]] = set()
+
         # Hook-система (lifecycle hooks)
         self.hooks = HookRegistry()
 
@@ -583,10 +588,13 @@ class Agent:
                     meta, self.memory_path
                 )
                 if missing_memory:
-                    logger.warning(
-                        f"Скилл '{skill_name}' активен, но ждёт файлы памяти: "
-                        f"{', '.join(missing_memory)}"
-                    )
+                    warn_key = (skill_name, tuple(sorted(missing_memory)))
+                    if warn_key not in self._skill_memory_warned:
+                        logger.warning(
+                            f"Скилл '{skill_name}' активен, но ждёт файлы памяти: "
+                            f"{', '.join(missing_memory)}"
+                        )
+                        self._skill_memory_warned.add(warn_key)
 
             eligible.append((skill_name, meta, body if meta else raw))
 

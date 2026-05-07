@@ -73,8 +73,14 @@ async def tg_retry(
             if attempt == attempts - 1:
                 logger.warning(f"{op}: exhausted {attempts} attempts (flood): {e}")
                 raise
-            delay = min(float(e.retry_after) + 0.5, MAX_RETRY_AFTER)
-            logger.info(f"{op}: RetryAfter {e.retry_after}s, sleeping")
+            # PTB v22.2+ переезжает с float на timedelta для retry_after
+            # (env PTB_TIMEDELTA=true опт-ин). Принимаем оба варианта.
+            ra = e.retry_after
+            ra_seconds = (
+                ra.total_seconds() if hasattr(ra, "total_seconds") else float(ra)
+            )
+            delay = min(ra_seconds + 0.5, MAX_RETRY_AFTER)
+            logger.info(f"{op}: RetryAfter {ra_seconds}s, sleeping")
             await asyncio.sleep(delay)
         except BadRequest:
             # В PTB BadRequest наследует NetworkError (исторически), но это

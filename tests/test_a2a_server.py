@@ -112,7 +112,7 @@ class TestJsonRpc:
     def test_invalid_json_returns_parse_error(self, bus_fleet, monkeypatch):
         _allow_unauth(monkeypatch)
         _, _, client = bus_fleet
-        r = client.post("/a2a/me", data="not-json", headers={"Content-Type": "application/json"})
+        r = client.post("/a2a/me", content=b"not-json", headers={"Content-Type": "application/json"})
         body = r.json()
         assert body["error"]["code"] == -32700
 

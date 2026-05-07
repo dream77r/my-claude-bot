@@ -1,11 +1,19 @@
 """Тесты retry-обёртки для Telegram API."""
 
+import warnings
 from unittest.mock import patch
 
 import pytest
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from src.telegram_retry import tg_retry
+
+# PTB v22.2+ депрекейтит int-семантику retry_after в пользу timedelta;
+# наш код умеет оба типа, warning из самого PTB при доступе к атрибуту —
+# не наша проблема, заглушаем именно его.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::telegram.warnings.PTBDeprecationWarning"
+)
 
 
 @pytest.mark.asyncio
