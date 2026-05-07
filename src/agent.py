@@ -200,6 +200,15 @@ class Agent:
                 make_audit_hook(self.config_path.parent.as_posix())
             )
 
+        # Reminders persistence — перехват CronCreate/CronDelete для
+        # сохранения напоминаний между перезапусками бота.
+        # Всегда включён: напоминания пользователя не должны теряться.
+        from .reminders import make_reminders_hook
+        self.hooks.register_fn(
+            "on_tool_use", "reminders_persistence",
+            make_reminders_hook(self.agent_dir),
+        )
+
         # Checkpoint Recovery — сохранение состояния при крэше
         checkpoint_enabled = self.config.get("checkpoint", {}).get("enabled", True)
         if checkpoint_enabled:
@@ -1194,12 +1203,17 @@ class Agent:
                                 pass
                     elif isinstance(block, ToolUseBlock):
                         # Hook: on_tool_use
+                        # tool_use_id (block.id) нужен reminders_persistence:
+                        # CronCreate возвращает job_id, которым Claude потом
+                        # вызовет CronDelete. block.id — потенциальный источник
+                        # этого job_id, передаём для корректного matching.
                         await self.hooks.emit("on_tool_use", HookContext(
                             event="on_tool_use",
                             agent_name=self.name,
                             data={
                                 "tool_name": block.name,
                                 "tool_input": block.input,
+                                "tool_use_id": block.id,
                             },
                         ))
                         if on_tool_use:

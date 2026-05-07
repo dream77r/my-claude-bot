@@ -42,6 +42,7 @@ from .agent_manager import AgentManager
 from .agent_worker import AgentWorker
 from .bus import FleetBus
 from .cron import cron_loop
+from .reminders import reminders_loop
 from .delegation import DelegationManager
 from .dispatcher import dispatcher_loop
 from .dream import dream_loop
@@ -281,6 +282,17 @@ class FleetRuntime:
                 )
             )
             agent_tasks.append(cron_task)
+
+        # Reminders persistence loop — восстанавливает CronCreate-напоминания
+        # после перезапуска. Запускается для всех агентов безусловно:
+        # reminders.json может появиться в любой момент.
+        reminders_task = asyncio.create_task(
+            reminders_loop(
+                agent.agent_dir, agent.name, bus=self.bus,
+                chat_id=_master_notify_chat_id(agent),
+            )
+        )
+        agent_tasks.append(reminders_task)
 
         # Dispatcher: поллит memory/dispatch/ и публикует в bus.
         # Нужен для cron/heartbeat/self-triggered сообщений, которые
