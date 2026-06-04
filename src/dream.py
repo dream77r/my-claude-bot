@@ -181,6 +181,73 @@ async def _call_claude_simple(
     )
 
 
+# Суффикс, добавляемый к промпту Phase 1 при повторных попытках —
+# явно указывает LLM формат ответа.
+_PHASE1_STRICT_JSON_SUFFIX = (
+    "\n\nВАЖНО: Предыдущий ответ не содержал валидный JSON. "
+    "Ответь ТОЛЬКО JSON объектом без лишнего текста:\n"
+    '{"facts": [{"title": "...", "content": "..."}, ...], "summary": "краткое резюме"}'
+)
+
+
+async def _phase1_with_retry(
+    prompt: str,
+    model: str,
+    cwd: str,
+    system_prompt: str | None,
+    max_retries: int = 2,
+) -> tuple[dict | None, str]:
+    """Вызов Phase 1 с retry при ошибке парсинга JSON.
+
+    На повторных попытках добавляет строгий суффикс, явно указывающий формат.
+    Логирует каждую неудачную попытку.
+
+    Returns:
+        (parsed_json, last_response) — parsed_json=None если все попытки провалились.
+    """
+    last_response = ""
+    total = max_retries + 1
+
+    for attempt in range(total):
+        current_prompt = prompt if attempt == 0 else prompt + _PHASE1_STRICT_JSON_SUFFIX
+        if attempt > 0:
+            logger.warning(
+                f"Dream Phase 1: повтор {attempt}/{max_retries} после неудачи парсинга JSON"
+            )
+
+        try:
+            response = await _call_claude_simple(
+                current_prompt,
+                model=model,
+                cwd=cwd,
+                system_prompt=system_prompt,
+            )
+        except Exception as e:
+            logger.error(f"Dream Phase 1 попытка {attempt + 1}/{total}: ошибка вызова LLM: {e}")
+            continue
+
+        last_response = response
+        facts_json = _extract_json(response)
+        if facts_json is not None:
+            if attempt > 0:
+                logger.info(
+                    f"Dream Phase 1: JSON успешно получен на попытке {attempt + 1}/{total}"
+                )
+            return facts_json, response
+
+        logger.warning(
+            f"Dream Phase 1 попытка {attempt + 1}/{total}: "
+            f"не удалось извлечь JSON (длина ответа: {len(response)} символов)"
+        )
+
+    # Все попытки провалились — сохраняем полный ответ для отладки
+    logger.error(
+        f"Dream Phase 1: все {total} попытки провалились. "
+        f"Последний ответ LLM:\n{last_response}"
+    )
+    return None, last_response
+
+
 async def dream_cycle(
     agent_dir: str,
     model_phase1: str = "haiku",
@@ -263,23 +330,21 @@ async def dream_cycle(
     )
 
     try:
-        phase1_response = await _call_claude_simple(
+        facts_json, _phase1_response = await _phase1_with_retry(
             prompt1,
             model=model_phase1,
             cwd=str(memory_path),
             system_prompt=system1,
         )
-        result["phase1_ok"] = True
     except Exception as e:
-        logger.error(f"Dream Phase 1 error: {e}")
+        logger.error(f"Dream Phase 1 неожиданная ошибка: {e}")
         return result
 
-    # Парсим JSON из ответа
-    facts_json = _extract_json(phase1_response)
     if not facts_json:
-        logger.warning("Dream Phase 1: не удалось извлечь JSON из ответа")
         result["summary"] = "Phase 1 не вернула валидный JSON"
         return result
+
+    result["phase1_ok"] = True
 
     facts = facts_json.get("facts", [])
     result["facts_count"] = len(facts)

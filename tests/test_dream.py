@@ -2,12 +2,14 @@
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.dream import (
     _extract_json,
     _get_cursor,
+    _phase1_with_retry,
     _save_cursor,
     _split_template,
     _substitute,
@@ -113,6 +115,86 @@ class TestSplitTemplate:
         system, user = _split_template(text)
         assert system == "sys"
         assert user == "usr"
+
+
+class TestPhase1WithRetry:
+    """Тесты retry-логики Phase 1 при ошибках парсинга JSON."""
+
+    @pytest.mark.asyncio
+    async def test_success_on_first_attempt(self):
+        """Успешный парсинг с первой попытки — без retry."""
+        good_response = '{"facts": [{"title": "Test", "content": "data"}], "summary": "ok"}'
+        with patch("src.dream._call_claude_simple", new=AsyncMock(return_value=good_response)):
+            result, response = await _phase1_with_retry(
+                prompt="test", model="haiku", cwd="/tmp", system_prompt=None
+            )
+        assert result == {"facts": [{"title": "Test", "content": "data"}], "summary": "ok"}
+        assert response == good_response
+
+    @pytest.mark.asyncio
+    async def test_success_on_second_attempt(self):
+        """Первая попытка возвращает не-JSON, вторая — валидный JSON."""
+        bad = "Извините, вот мой ответ: просто текст"
+        good = '{"facts": [], "summary": "retry worked"}'
+        call_mock = AsyncMock(side_effect=[bad, good])
+        with patch("src.dream._call_claude_simple", new=call_mock):
+            result, response = await _phase1_with_retry(
+                prompt="test", model="haiku", cwd="/tmp", system_prompt=None
+            )
+        assert result == {"facts": [], "summary": "retry worked"}
+        assert call_mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_strict_prompt_on_retry(self):
+        """На retry к промпту добавляется строгий суффикс."""
+        bad = "просто текст"
+        good = '{"facts": [], "summary": "ok"}'
+        call_mock = AsyncMock(side_effect=[bad, good])
+        with patch("src.dream._call_claude_simple", new=call_mock):
+            await _phase1_with_retry(
+                prompt="base prompt", model="haiku", cwd="/tmp", system_prompt=None
+            )
+        # prompt передаётся первым позиционным аргументом
+        first_prompt = call_mock.call_args_list[0].args[0]
+        retry_prompt = call_mock.call_args_list[1].args[0]
+        assert first_prompt == "base prompt"
+        assert retry_prompt.startswith("base prompt")
+        assert "ВАЖНО" in retry_prompt
+
+    @pytest.mark.asyncio
+    async def test_all_attempts_fail_returns_none(self):
+        """Если все попытки вернули не-JSON — возвращаем None без исключения."""
+        bad = "вообще не JSON"
+        call_mock = AsyncMock(return_value=bad)
+        with patch("src.dream._call_claude_simple", new=call_mock):
+            result, last_response = await _phase1_with_retry(
+                prompt="test", model="haiku", cwd="/tmp", system_prompt=None, max_retries=2
+            )
+        assert result is None
+        assert last_response == bad
+        assert call_mock.call_count == 3  # 1 initial + 2 retries
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_on_first_retries_and_succeeds(self):
+        """LLM бросает исключение на первой попытке, успешно на второй."""
+        good = '{"facts": [], "summary": "recovered"}'
+        call_mock = AsyncMock(side_effect=[RuntimeError("timeout"), good])
+        with patch("src.dream._call_claude_simple", new=call_mock):
+            result, _ = await _phase1_with_retry(
+                prompt="test", model="haiku", cwd="/tmp", system_prompt=None
+            )
+        assert result == {"facts": [], "summary": "recovered"}
+
+    @pytest.mark.asyncio
+    async def test_all_llm_exceptions_returns_none(self):
+        """Все попытки бросают исключение — возвращаем None, не крашимся."""
+        call_mock = AsyncMock(side_effect=RuntimeError("network error"))
+        with patch("src.dream._call_claude_simple", new=call_mock):
+            result, last_response = await _phase1_with_retry(
+                prompt="test", model="haiku", cwd="/tmp", system_prompt=None, max_retries=1
+            )
+        assert result is None
+        assert last_response == ""  # ничего не получили
 
 
 class TestSubstitute:
