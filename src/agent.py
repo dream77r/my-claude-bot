@@ -885,11 +885,6 @@ class Agent:
         if ctx:
             parts.append("## Контекст из памяти\n\n" + ctx)
 
-        # 4.5. Общие знания флота (shared memory — читают все агенты)
-        shared = memory.read_shared_knowledge(self.agent_dir)
-        if shared:
-            parts.append("## Общие знания флота\n\n" + shared)
-
         # 5. Контекст флота (master) или изоляция (worker)
         fleet = self._build_fleet_context()
         if fleet:
@@ -972,11 +967,6 @@ class Agent:
         ctx = memory.read_group_context(self.agent_dir, chat_id)
         if ctx:
             parts.append("## Контекст из памяти\n\n" + ctx)
-
-        # 5.5. Общие знания флота
-        shared = memory.read_shared_knowledge(self.agent_dir)
-        if shared:
-            parts.append("## Общие знания флота\n\n" + shared)
 
         # 6. Инструкция по работе с файлами (outbox)
         outbox_path = Path(self.agent_dir) / "memory" / "outbox"

@@ -650,53 +650,6 @@ def build_smart_context(
     return "\n".join(parts)
 
 
-def ensure_shared_dirs(agents_dir: str) -> None:
-    """
-    Создать структуру shared memory для флота.
-
-    Создаёт agents/shared/memory/ со стартовым index.md если не существует.
-    Вызывается при старте бота — идемпотентна.
-
-    Args:
-        agents_dir: путь к папке agents/ (родитель всех agent-директорий)
-    """
-    shared_memory = Path(agents_dir) / "shared" / "memory"
-    wiki_dir = shared_memory / "wiki" / "concepts"
-    wiki_dir.mkdir(parents=True, exist_ok=True)
-
-    index_path = shared_memory / "wiki" / "index.md"
-    if not index_path.exists():
-        index_path.write_text(
-            "# Каталог общих знаний флота\n\n"
-            "_Общая память флота. Читается всеми агентами через системный промпт.\n"
-            "Пишет только мастер-агент `me` (или по его поручению)._\n\n"
-            "## Концепции (wiki/concepts/)\n\n"
-            "_Пока пусто — знания будут добавляться по мере накопления._\n",
-            encoding="utf-8",
-        )
-        logger.info("Shared memory инициализирована: agents/shared/memory/wiki/index.md")
-
-
-def read_shared_knowledge(agent_dir: str) -> str:
-    """
-    Прочитать общие знания флота из agents/shared/memory/wiki/index.md.
-
-    Shared memory — общий "мозг" флота, доступный всем агентам на чтение.
-    Путь вычисляется относительно agents/ (родитель agent_dir).
-
-    Returns:
-        Содержимое index.md, или "" если shared memory не существует.
-    """
-    shared_index = Path(agent_dir).parent / "shared" / "memory" / "wiki" / "index.md"
-    if not shared_index.exists():
-        return ""
-    try:
-        return shared_index.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        logger.warning(f"Не удалось прочитать shared knowledge: {e}")
-        return ""
-
-
 def save_session_id(agent_dir: str, session_id: str) -> None:
     """Сохранить ID сессии Claude CLI для --resume."""
     memory = get_memory_path(agent_dir)
