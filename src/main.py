@@ -553,6 +553,9 @@ async def async_main() -> None:
     # Глобальный семафор для Claude CLI
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLAUDE)
 
+    # Инициализировать shared memory флота (agents/shared/memory/)
+    memory.ensure_shared_dirs(str(root / "agents"))
+
     # Инициализировать git для памяти каждого агента
     for agent in agents:
         if memory.git_init(agent.agent_dir):

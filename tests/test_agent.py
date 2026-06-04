@@ -132,6 +132,31 @@ class TestBuildSystemPrompt:
         prompt = agent.build_system_prompt()
         assert "Фаундер стартапа" in prompt
 
+    def test_includes_shared_knowledge(self, agent):
+        """Shared knowledge из agents/shared/memory/wiki/index.md
+        должна появляться в системном промпте агента."""
+        agents_dir = Path(agent.agent_dir).parent
+        shared_index = agents_dir / "shared" / "memory" / "wiki" / "index.md"
+        shared_index.parent.mkdir(parents=True, exist_ok=True)
+        shared_index.write_text("# Флот: общее правило\nВсегда отвечай по делу.")
+        prompt = agent.build_system_prompt()
+        assert "Флот: общее правило" in prompt
+        assert "Всегда отвечай по делу" in prompt
+
+    def test_no_shared_knowledge_if_missing(self, agent):
+        """Если shared/memory/wiki/index.md не существует — промпт не ломается."""
+        prompt = agent.build_system_prompt()
+        assert "Общие знания флота" not in prompt
+
+    def test_shared_knowledge_section_label(self, agent):
+        """Shared knowledge должна быть под заголовком ## Общие знания флота."""
+        agents_dir = Path(agent.agent_dir).parent
+        shared_index = agents_dir / "shared" / "memory" / "wiki" / "index.md"
+        shared_index.parent.mkdir(parents=True, exist_ok=True)
+        shared_index.write_text("Тест")
+        prompt = agent.build_system_prompt()
+        assert "## Общие знания флота" in prompt
+
 
 class TestBuildGroupSystemPrompt:
     """Регрессии для build_group_system_prompt — раздела «Режим группового
