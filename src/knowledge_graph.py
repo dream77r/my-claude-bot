@@ -89,6 +89,115 @@ def _entity_folder(entity_type: str) -> str:
     return _ENTITY_TYPE_TO_FOLDER.get(_normalize_entity_type(entity_type), "topics")
 
 
+# Блок-лист инфраструктурных имён — не попадают в граф как entity.
+# LLM иногда «видит» внутренние компоненты агента в тексте логов и пытается
+# добавить их как узлы. Список расширяемый: добавляй snake_case-имена файлов,
+# системных компонентов, служебных скиллов.
+_ENTITY_INFRA_BLOCKLIST: frozenset[str] = frozenset({
+    # Python-модули и файлы
+    "wiki_lint", "wiki_lint.py",
+    "knowledge_graph", "knowledge_graph.py",
+    "dream", "dream.py",
+    "consolidator", "consolidator.py",
+    "git_committer", "git_committer.py",
+    "memory", "memory.py",
+    "agent_worker", "agent_worker.py",
+    "telegram_bridge", "telegram_bridge.py",
+    "fleet_bus", "fleet_bus.py",
+    "skill_pool", "skill_pool.py",
+    "skill_advisor", "skill_advisor.py",
+    "schema_advisor", "schema_advisor.py",
+    "mcp_skill_marketplace",
+    "smart_trigger", "smart_trigger.py",
+    # Системные компоненты / термины
+    "smarttrigger", "deadline_check", "evening_digest",
+    "fleetbus", "fleetruntime", "agentworker",
+    "dream_loop", "dream_cycle", "dream phase", "dream phase 1", "dream phase 2",
+    "kg level 1", "kg level 2", "kg level 3",
+    "bm25", "bfs", "graph.json",
+    # Технические скиллы-файлы
+    "wiki-search", "wiki_search",
+    "document-analysis", "web-research", "bugreport",
+})
+
+
+def _is_infra_entity(name: str) -> bool:
+    """Вернуть True если name — инфраструктурное имя, не нужное в графе."""
+    norm = name.strip().lower()
+    return norm in _ENTITY_INFRA_BLOCKLIST
+
+
+# ── Детерминированное (regex) извлечение entity ──
+#
+# Перед LLM-вызовом выполняем быстрый детерминированный проход:
+# извлекаем все [[WikiLink]] упоминания и пары, встречающиеся рядом.
+# Это гарантирует, что уже «поименованные» сущности всегда попадают в граф,
+# и снижает нагрузку на LLM (ему остаётся искать только неявные связи).
+
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]")
+
+
+def _extract_wikilinks(text: str) -> list[str]:
+    """Извлечь все [[Entity]] имена из текста. Возвращает дедуплицированный список."""
+    raw = _WIKILINK_RE.findall(text)
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in raw:
+        name = name.strip()
+        if name and not _is_infra_entity(name) and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def _extract_regex_entities_and_links(
+    text: str, date_str: str
+) -> tuple[list[dict], list[dict]]:
+    """
+    Детерминированный pre-pass: extract entities and co-occurrence links
+    from [[WikiLink]] mentions without LLM.
+
+    Returns:
+        (entities, links) — lists ready to merge with LLM output.
+        entities: [{name, type, confidence}]
+        links:    [{from, to, type, context, confidence, date}]
+    """
+    names = _extract_wikilinks(text)
+    if not names:
+        return [], []
+
+    entities = [
+        {"name": n, "type": "Topic", "confidence": 0.9}
+        for n in names
+    ]
+
+    # Co-occurrence links: пары [[A]] и [[B]] в пределах одного абзаца (до 300 символов)
+    # Ищем абзацы, где встречаются 2+ сущности → related_to
+    links: list[dict] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for para in re.split(r"\n{2,}", text):
+        para_names = _extract_wikilinks(para)
+        if len(para_names) < 2:
+            continue
+        for i in range(len(para_names)):
+            for j in range(i + 1, len(para_names)):
+                a, b = para_names[i], para_names[j]
+                pair = (min(a, b), max(a, b))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    links.append({
+                        "from": a,
+                        "to": b,
+                        "type": "related_to",
+                        "context": f"co-mentioned {date_str} (regex)",
+                        "confidence": 0.7,
+                        "date": date_str,
+                    })
+
+    return entities, links
+
+
 # Supersession (Этап 4 KG_WIKI_PLAN.md). Для типов связей из этого набора
 # работает правило "single-value": одна сущность может иметь только одну
 # *активную* связь такого типа. Когда LLM извлекает новую — старая
@@ -593,17 +702,33 @@ async def link_daily_entities(
             rel = md_file.relative_to(memory_path)
             existing_pages.append(str(rel))
 
+    # ── Regex pre-pass: детерминированно extract [[WikiLink]] сущности ──
+    regex_entities, regex_links = _extract_regex_entities_and_links(daily_content, date_str)
+    if regex_entities:
+        logger.info(
+            f"KG Level 1: regex нашёл {len(regex_entities)} entity, "
+            f"{len(regex_links)} co-occurrence link"
+        )
+
     # Загрузить шаблон
     template = _load_template(agent_dir, "kg_level1_links.md")
     if not template:
         # Fallback-промпт
         template = _LEVEL1_FALLBACK
 
+    # Передаём LLM список уже найденных entity — чтобы не искал заново
+    known_names_hint = ""
+    if regex_entities:
+        known_names_hint = (
+            "\n\n## Уже найденные сущности (добавь их в свой ответ + ищи новые)\n"
+            + "\n".join(f"- {e['name']}" for e in regex_entities)
+        )
+
     prompt = template.format(
         daily_content=daily_content,
         date=date_str,
         existing_pages="\n".join(f"- {p}" for p in existing_pages) if existing_pages else "(пусто)",
-    )
+    ) + known_names_hint
 
     try:
         response = await _call_claude_simple(
@@ -611,16 +736,47 @@ async def link_daily_entities(
         )
     except Exception as e:
         logger.error(f"KG Level 1 error: {e}")
+        # Даже без LLM — сохраняем regex-результаты если они есть
+        if regex_entities:
+            result["entities"] = regex_entities
+            result["links_found"] = len(regex_links)
+            result["ok"] = True
         return result
 
     # Парсим JSON
     data = _extract_json(response)
     if not data:
         logger.warning("KG Level 1: не удалось извлечь JSON")
-        return result
+        # Fallback на regex-результаты
+        if regex_entities:
+            logger.info("KG Level 1: используем только regex-результаты")
+            entities = regex_entities
+            links = regex_links
+        else:
+            return result
+    else:
+        # Мержим: LLM-результаты + regex (дедупликация по имени)
+        llm_entities = data.get("entities", [])
+        llm_links = data.get("links", [])
+        llm_names = {e.get("name", "").strip().lower() for e in llm_entities}
+        # Добавляем regex-entities которые LLM не нашёл
+        extra_entities = [
+            e for e in regex_entities
+            if e["name"].strip().lower() not in llm_names
+        ]
+        entities = llm_entities + extra_entities
+        # Добавляем regex co-occurrence links которых нет в LLM-ответе
+        llm_pairs = {
+            (lnk.get("from", ""), lnk.get("to", ""))
+            for lnk in llm_links
+        }
+        extra_links = [
+            lnk for lnk in regex_links
+            if (lnk["from"], lnk["to"]) not in llm_pairs
+            and (lnk["to"], lnk["from"]) not in llm_pairs
+        ]
+        links = llm_links + extra_links
 
-    entities = data.get("entities", [])
-    links = data.get("links", [])
     result["entities"] = entities
     result["links_found"] = len(links)
 
@@ -628,6 +784,9 @@ async def link_daily_entities(
     for entity in entities:
         ent_name = entity.get("name", "").strip()
         if not ent_name:
+            continue
+        if _is_infra_entity(ent_name):
+            logger.debug(f"KG L1: пропускаем инфраструктурную entity '{ent_name}'")
             continue
         # Принимаем оба ключа — новый "type" и старый "category"
         ent_type = entity.get("type") or entity.get("category") or "Topic"
@@ -663,6 +822,12 @@ async def link_daily_entities(
         # Обновить graph.json
         graph = _load_graph(agent_dir)
         for link in links:
+            # Пропускаем рёбра с инфраструктурными именами
+            if _is_infra_entity(link.get("from", "")) or _is_infra_entity(link.get("to", "")):
+                logger.debug(
+                    f"KG L1: пропускаем инфра-ребро '{link.get('from')}' → '{link.get('to')}'"
+                )
+                continue
             edge = {
                 "from": link.get("from", ""),
                 "to": link.get("to", ""),
