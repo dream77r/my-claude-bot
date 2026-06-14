@@ -127,6 +127,10 @@ class StatusMessage:
                     return True
                 # Если HTML не парсится — попробовать plain text
                 if fmt_parse_mode:
+                    logger.warning(
+                        f"Finalize HTML edit failed ({e}), trying plain text. "
+                        f"HTML preview: {formatted_text[:200]!r}"
+                    )
                     try:
                         await tg_retry(
                             lambda: self.context.bot.edit_message_text(
@@ -140,7 +144,7 @@ class StatusMessage:
                         return True
                     except Exception:
                         pass
-                logger.debug(f"Finalize edit failed: {e}")
+                logger.warning(f"Finalize edit failed: {e}")
                 # Если edit не сработал — fallback на delete+send
                 await self.cleanup()
                 return False
