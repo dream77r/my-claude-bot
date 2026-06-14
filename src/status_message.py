@@ -9,6 +9,7 @@ import time
 from telegram.constants import ChatAction
 
 from .formatter import TG_MESSAGE_LIMIT, format_for_telegram
+from .rich_message import has_markdown_table, send_rich_message
 from .telegram_retry import tg_retry
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class StatusMessage:
         Финальное обновление — edit вместо delete+new.
 
         Returns:
-            True если удалось отредактировать на месте.
+            True если удалось отредактировать на месте (или отправить rich message).
             False если нужен новый send (длинный текст, ошибка edit).
         """
         self._stop_typing()
@@ -85,6 +86,16 @@ class StatusMessage:
 
         if not self.message_id:
             return False
+
+        # Rich Message path: если есть таблица — пробуем Bot API 10.1 sendRichMessage
+        if has_markdown_table(text):
+            await self.cleanup()  # Удаляем статус-сообщение
+            success = await send_rich_message(
+                self.context.bot, self.chat_id, text, self.thread_id
+            )
+            # True → rich отправлен, caller ничего больше не делает
+            # False → caller отправит через HTML (_send_via_bot)
+            return success
 
         # Если текст влезает в одно сообщение — edit на месте
         if len(text) <= TG_MESSAGE_LIMIT:
