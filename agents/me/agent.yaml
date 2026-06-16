@@ -119,7 +119,7 @@ heartbeat:
       model: "sonnet"
       notify: true
     - name: "deadline_check"
-      schedule: "0 */4 * * *"
+      schedule: "0 8 * * *"
       prompt: |
         Проверка дедлайнов по локальной wiki агента.
 
