@@ -28,6 +28,8 @@ skills:
   - "web-research"
   - "wiki-search"
   - "bugreport"
+  - "unit-economics"
+  - "scenario-modeling"
 allowed_users:
   - ${FOUNDER_TELEGRAM_ID}
 max_context_messages: 50

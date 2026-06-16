@@ -34,6 +34,9 @@ skills:
   - "bugreport"
   - "git-workflow"
   - "project-discovery"
+  - "architecture-review"
+  - "performance-profiling"
+  - "secure-code-review"
 allowed_users:
   - ${FOUNDER_TELEGRAM_ID}
 max_context_messages: 50
