@@ -251,6 +251,8 @@ if [ "$LOCAL" = "$REMOTE" ]; then
     echo -e "${GREEN}  ✓ Code is up to date${RESET}"
     if [ "$STASHED" -eq 1 ]; then
         git stash pop --quiet
+        STASHED=0  # сброс: иначе финальный блок восстановления pop'нет
+                   # повторно и вытащит ЧУЖОЙ старый стэш → ложный конфликт
         echo -e "${GREEN}  ✓ Local changes restored${RESET}"
     fi
     # Не выходим — всё равно перезапустим сервис
