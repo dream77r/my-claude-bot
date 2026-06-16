@@ -27,6 +27,26 @@ class TestMarkdownToHtml:
     def test_header(self):
         assert markdown_to_html("# Заголовок") == "<b>Заголовок</b>"
 
+    def test_blockquote_single_line(self):
+        result = markdown_to_html("> цитата")
+        assert "<blockquote>цитата</blockquote>" in result
+
+    def test_blockquote_expandable_three_lines(self):
+        result = markdown_to_html("> строка 1\n> строка 2\n> строка 3")
+        assert (
+            "<blockquote expandable>строка 1\nстрока 2\nстрока 3</blockquote>"
+            in result
+        )
+
+    def test_blockquote_formats_inner_content(self):
+        result = markdown_to_html("> цитата с **жирным**")
+        assert "<blockquote>цитата с <b>жирным</b></blockquote>" in result
+
+    def test_gt_not_at_line_start_is_not_blockquote(self):
+        result = markdown_to_html("5 > 3 в выражении")
+        assert "blockquote" not in result
+        assert "&gt;" in result
+
     def test_link(self):
         result = markdown_to_html("[GitHub](https://github.com)")
         assert result == '<a href="https://github.com">GitHub</a>'

@@ -54,11 +54,29 @@ _ITALIC_RE = re.compile(r"(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])")
 # Ссылки [text](url)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
+# Блоки цитат > text. После _html.escape ">" превращается в "&gt;", поэтому
+# матчим именно "&gt; ". Одна или несколько подряд идущих строк цитаты.
+_BLOCKQUOTE_RE = re.compile(r"((?:^&gt; .+\n?)+)", re.MULTILINE)
+
 # Быстрый тест: есть ли в тексте Markdown вообще
 _HAS_MARKDOWN_RE = re.compile(
-    r"```|`[^`]|\*\*|__|\[.+\]\(.+\)|^#{1,6} |~~",
+    r"```|`[^`]|\*\*|__|\[.+\]\(.+\)|^#{1,6} |~~|^> ",
     re.MULTILINE,
 )
+
+
+def _blockquote_sub(m: re.Match) -> str:
+    """Заменить блок Markdown-цитат на Telegram HTML <blockquote>.
+
+    3+ строки → <blockquote expandable> (сворачиваемый в клиенте),
+    1–2 строки → обычный <blockquote>.
+    """
+    raw = m.group(0).rstrip("\n")
+    lines = raw.split("\n")
+    # Снять префикс "&gt; " (5 символов) с каждой строки
+    content = "\n".join(line[5:] for line in lines)
+    tag = "blockquote expandable" if len(lines) >= 3 else "blockquote"
+    return f"<{tag}>{content}</blockquote>\n"
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -142,6 +160,10 @@ def markdown_to_html(text: str) -> str:
 
             # Шаг 3: обычный текст — экранировать HTML, затем применить форматирование
             s = _html.escape(subpart)
+
+            # Цитаты (> text) — до inline-форматирования, чтобы содержимое
+            # внутри цитаты тоже форматировалось (жирный/ссылки и т.п.)
+            s = _BLOCKQUOTE_RE.sub(_blockquote_sub, s)
 
             # Заголовки (# text) — до остального, чтобы не ломать ссылки
             s = _HEADER_RE.sub(r"<b>\1</b>", s)
