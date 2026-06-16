@@ -30,6 +30,7 @@ skills:
   - "bugreport"
   - "unit-economics"
   - "scenario-modeling"
+  - "medical-advisor"
 allowed_users:
   - ${FOUNDER_TELEGRAM_ID}
 max_context_messages: 50
