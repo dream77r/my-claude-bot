@@ -9,7 +9,7 @@
 #               remote ssh scripts).
 #
 # What it does:
-# 1. Checks for local changes that might conflict
+# 1. Checks for local changes that might conflict (src/ + agents/ skills)
 # 2. Pulls latest code from GitHub
 # 3. Updates Python dependencies (always — idempotent)
 # 4. Restarts the service (systemd or docker)
@@ -22,6 +22,7 @@ set -e
 # ══════════════════════════════════════════
 
 AUTO_YES=0
+STASHED_SKILLS=0
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) AUTO_YES=1 ;;
@@ -205,6 +206,37 @@ if [ ! -f .migrated_clear_group_sessions ] && \
     fi
 fi
 
+# ══════════════════════════════════════════
+# Конфликты в agents/ (скиллы/SOUL — не стэшатся выше)
+# ══════════════════════════════════════════
+# Верхняя проверка (Checking for conflicts) стэшит только src/. Файлы в
+# agents/*/skills/ и SOUL.md — user data, update.sh их не трогает. Но если
+# локально правленый скилл ОБНОВЛЯЕТСЯ сверху, git pull --ff-only упадёт
+# молча (set -e оборвёт скрипт без объяснения). Ловим заранее.
+if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
+    _INCOMING_AGENTS=$(git diff --name-only "${LOCAL}..${REMOTE}" -- agents/ 2>/dev/null || true)
+    _DIRTY_AGENTS=$(git diff --name-only -- agents/ 2>/dev/null || true)
+    SKILL_CLASH=""
+    if [ -n "$_INCOMING_AGENTS" ] && [ -n "$_DIRTY_AGENTS" ]; then
+        SKILL_CLASH=$(printf '%s\n' "$_DIRTY_AGENTS" | grep -Fxf <(printf '%s\n' "$_INCOMING_AGENTS") 2>/dev/null || true)
+    fi
+    if [ -n "$SKILL_CLASH" ]; then
+        echo ""
+        echo -e "${YELLOW}  ⚠ Локальные правки в agents/-файлах, которые обновляются сверху:${RESET}"
+        printf '%s\n' "$SKILL_CLASH" | while read -r f; do [ -n "$f" ] && echo -e "    ${DIM}$f${RESET}"; done || true
+        echo -e "  ${DIM}По ним git pull --ff-only упадёт. Их можно застэшить и восстановить после.${RESET}"
+        _ask "Stash эти правки и продолжить? [Y/n]" "Y" CONFIRM_SKILLS
+        if [[ "$CONFIRM_SKILLS" =~ ^[nN] ]]; then
+            echo -e "${YELLOW}  Update остановлен. Закоммить/застэшь правки в agents/ и запусти снова.${RESET}"
+            [ "$STASHED" -eq 1 ] && git stash pop --quiet 2>/dev/null || true
+            exit 0
+        fi
+        git stash push -m "pre-update-agents-$(date +%Y%m%d_%H%M%S)" -- agents/ >/dev/null
+        STASHED_SKILLS=1
+        echo -e "${GREEN}  ✓ Правки в agents/ застэшены${RESET}"
+    fi
+fi
+
 if [ -z "$REMOTE" ]; then
     echo -e "${RED}  ✗ Cannot reach remote 'origin/${BRANCH}'${RESET}"
     echo "  Check your internet connection or remote URL:"
@@ -289,6 +321,18 @@ fi
 # Восстановление stash
 # ══════════════════════════════════════════
 
+# Сначала agents/-стэш (он на вершине — пушился последним, после src/-стэша).
+if [ "$STASHED_SKILLS" -eq 1 ]; then
+    echo ""
+    echo -e "${BOLD}Restoring your agents/ customizations...${RESET}"
+    if git stash pop --quiet 2>/dev/null; then
+        echo -e "${GREEN}  ✓ Правки в agents/ восстановлены${RESET}"
+    else
+        echo -e "${YELLOW}  ⚠ Конфликт при восстановлении — правки сохранены в git stash${RESET}"
+        echo "  Разреши вручную: git stash list; git stash show -p | git apply"
+    fi
+fi
+
 if [ "$STASHED" -eq 1 ]; then
     echo ""
     echo -e "${BOLD}Restoring your local changes...${RESET}"
@@ -298,6 +342,21 @@ if [ "$STASHED" -eq 1 ]; then
         echo -e "${YELLOW}  ⚠ Merge conflict — your changes saved in git stash${RESET}"
         echo "  Resolve manually: git stash show -p | git apply"
     fi
+fi
+
+# ══════════════════════════════════════════
+# Подсказка: skills:-override в agent.local.yaml
+# ══════════════════════════════════════════
+# overlay-merge заменяет списки целиком (src/agent.py::_deep_merge). Если в
+# agent.local.yaml есть свой skills:, он перекрывает базовый — и скиллы,
+# добавленные сверху в этом обновлении, НЕ зарегистрируются, пока их не
+# дописать в локальный список. Чисто информируем (это не ошибка).
+_LOCAL_SKILL_OVR=$(grep -rEl '^[[:space:]]*skills:' agents/*/agent.local.yaml 2>/dev/null || true)
+if [ -n "$_LOCAL_SKILL_OVR" ]; then
+    echo ""
+    echo -e "${YELLOW}  ⚠ skills:-override в overlay — новые скиллы не подхватятся авто:${RESET}"
+    printf '%s\n' "$_LOCAL_SKILL_OVR" | while read -r f; do [ -n "$f" ] && echo -e "    ${DIM}$f${RESET}"; done || true
+    echo -e "  ${DIM}Сверь base agents/<имя>/agent.yaml и допиши недостающие скиллы в local-список.${RESET}"
 fi
 
 # ══════════════════════════════════════════
