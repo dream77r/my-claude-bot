@@ -279,6 +279,7 @@ class FleetRuntime:
             cron_task = asyncio.create_task(
                 cron_loop(
                     agent.config, agent.agent_dir, agent.name, bus=self.bus,
+                    chat_id=_master_notify_chat_id(agent),
                 )
             )
             agent_tasks.append(cron_task)
@@ -738,6 +739,7 @@ async def async_main() -> None:
                     agent.agent_dir,
                     agent.name,
                     bus=bus,
+                    chat_id=_master_notify_chat_id(agent),
                 )
             )
             if agent.name in runtime.tasks:
