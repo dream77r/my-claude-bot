@@ -182,6 +182,11 @@ async def _execute_job(
         # Worker-агенты не имеют прямого чата с пользователем (chat_id=0).
         # Маршрутизируем через мастер-агента, если notify_agent_name задан.
         target_agent = notify_agent_name or agent_name
+        if chat_id == 0:
+            logger.warning(
+                f"Cron '{job.name}': chat_id=0, уведомление не будет доставлено. "
+                f"Установите FOUNDER_TELEGRAM_ID в .env"
+            )
         notification = FleetMessage(
             source=f"agent:{agent_name}",
             target=f"telegram:{target_agent}",

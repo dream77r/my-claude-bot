@@ -37,16 +37,78 @@ def _master_notify_chat_id(agent: "Agent") -> int:
         return 0
 
 
-def _founder_chat_id() -> int:
+def _founder_chat_id(root: "Path | None" = None) -> int:
     """Return FOUNDER_TELEGRAM_ID as int, or 0 if not set/invalid.
+
+    Fallback chain (stops at first non-zero result):
+      1. FOUNDER_TELEGRAM_ID env var
+      2. agents/me/memory/settings.json  — keys: telegram_id / chat_id
+      3. agents/me/memory/profile.md     — regex: telegram[_ ]id: <digits>
+      4. 0 + warning (misconfigured deployment)
 
     Used for background notifications that must reach the founder regardless
     of which agent (master or worker) generated them.
     """
+    import json
+    import re
+
+    # 1. Env var (canonical config)
     try:
-        return int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+        val = int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+        if val:
+            return val
     except ValueError:
-        return 0
+        pass
+
+    # 2-3. Fallback: read from master-agent memory
+    if root is None:
+        root = find_project_root()
+
+    # settings.json
+    settings_path = root / "agents" / "me" / "memory" / "settings.json"
+    if settings_path.exists():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+            for key in ("telegram_id", "chat_id", "founder_telegram_id"):
+                raw = data.get(key)
+                if raw:
+                    val = int(raw)
+                    if val:
+                        logger.info(
+                            f"_founder_chat_id: получен из settings.json "
+                            f"({key}={val})"
+                        )
+                        return val
+        except Exception:
+            pass
+
+    # profile.md
+    profile_path = root / "agents" / "me" / "memory" / "profile.md"
+    if profile_path.exists():
+        try:
+            text = profile_path.read_text(encoding="utf-8")
+            for pattern in (
+                r"telegram[_\s]id[:\s*]+(\d{5,})",
+                r"chat[_\s]id[:\s*]+(\d{5,})",
+                r"FOUNDER_TELEGRAM_ID[:\s*]+(\d{5,})",
+            ):
+                m = re.search(pattern, text, re.IGNORECASE)
+                if m:
+                    val = int(m.group(1))
+                    if val:
+                        logger.info(
+                            f"_founder_chat_id: получен из profile.md (={val})"
+                        )
+                        return val
+        except Exception:
+            pass
+
+    logger.warning(
+        "FOUNDER_TELEGRAM_ID не задан в .env и не найден в agents/me/memory. "
+        "Уведомления от фоновых задач (cron, reminders) не будут доставлены. "
+        "Добавьте FOUNDER_TELEGRAM_ID=<ваш_telegram_id> в .env"
+    )
+    return 0
 
 from . import memory
 from .agent import Agent
@@ -295,7 +357,7 @@ class FleetRuntime:
                 cron_chat_id = _master_notify_chat_id(agent)
                 cron_notify_agent = None
             else:
-                cron_chat_id = _founder_chat_id()
+                cron_chat_id = _founder_chat_id(self.root)
                 cron_notify_agent = next(
                     (n for n, a in self.agents.items() if a.is_master), None
                 )
@@ -311,10 +373,16 @@ class FleetRuntime:
         # Reminders persistence loop — восстанавливает CronCreate-напоминания
         # после перезапуска. Запускается для всех агентов безусловно:
         # reminders.json может появиться в любой момент.
+        # Worker-агенты: используем founder chat_id (аналогично cron_loop).
+        reminders_chat_id = (
+            _master_notify_chat_id(agent)
+            if agent.is_master
+            else _founder_chat_id(self.root)
+        )
         reminders_task = asyncio.create_task(
             reminders_loop(
                 agent.agent_dir, agent.name, bus=self.bus,
-                chat_id=_master_notify_chat_id(agent),
+                chat_id=reminders_chat_id,
             )
         )
         agent_tasks.append(reminders_task)
@@ -768,7 +836,7 @@ async def async_main() -> None:
                 cron_chat_id = _master_notify_chat_id(agent)
                 cron_notify_agent = None
             else:
-                cron_chat_id = _founder_chat_id()
+                cron_chat_id = _founder_chat_id(root)
                 cron_notify_agent = _master_name
             cron_task = asyncio.create_task(
                 cron_loop(
@@ -785,6 +853,28 @@ async def async_main() -> None:
             tasks.append(cron_task)
             cron_names = [j["name"] for j in agent.config["cron"]]
             logger.info(f"Cron запущен для '{agent.name}': {', '.join(cron_names)}")
+
+    # ── Reminders ──
+    # Восстанавливает CronCreate-напоминания после перезапуска.
+    # Запускается для всех агентов безусловно: reminders.json может
+    # появиться в любой момент (например от CronCreate внутри turn'а).
+    # Worker-агенты: используем founder chat_id (аналогично cron_loop).
+    for agent in agents:
+        reminders_chat_id = (
+            _master_notify_chat_id(agent)
+            if agent.is_master
+            else _founder_chat_id(root)
+        )
+        reminders_task = asyncio.create_task(
+            reminders_loop(
+                agent.agent_dir, agent.name, bus=bus,
+                chat_id=reminders_chat_id,
+            )
+        )
+        if agent.name in runtime.tasks:
+            runtime.tasks[agent.name].append(reminders_task)
+        tasks.append(reminders_task)
+        logger.info(f"Reminders loop запущен для '{agent.name}'")
 
     # ── Dispatcher ──
     # Смотрит memory/dispatch/ у каждого агента через inotify (fallback —

@@ -285,3 +285,194 @@ class TestExecuteJobNotificationRouting:
             )
 
         assert bus._queues["telegram:me"].empty()
+
+
+class TestExecuteJobZeroChatIdWarning:
+    """_execute_job логирует warning когда chat_id=0 и notify=True."""
+
+    def _make_sdk_modules(self, text: str):
+        import claude_agent_sdk as real_sdk
+
+        real_msg = real_sdk.AssistantMessage(
+            content=[real_sdk.TextBlock(text=text)],
+            model="haiku",
+            session_id="test-session",
+        )
+
+        async def _fake_query(**kwargs):
+            yield real_msg
+
+        mock_sdk = MagicMock()
+        mock_sdk.AssistantMessage = real_sdk.AssistantMessage
+        mock_sdk.ResultMessage = real_sdk.ResultMessage
+        mock_sdk.TextBlock = real_sdk.TextBlock
+        mock_sdk.ClaudeAgentOptions = real_sdk.ClaudeAgentOptions
+        mock_sdk.query = lambda **kw: _fake_query(**kw)
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory_path.return_value = "/tmp/test"
+        mock_memory.git_commit = MagicMock()
+        return mock_sdk, mock_memory
+
+    @pytest.mark.asyncio
+    async def test_warning_logged_when_chat_id_zero(self, caplog):
+        """chat_id=0 + notify=True → warning в лог."""
+        import logging
+        import sys
+
+        bus = FleetBus()
+        bus.subscribe("telegram:worker")
+
+        job = CronJob(
+            name="daily_digest",
+            schedule="* * * * *",
+            prompt="test prompt",
+            model="haiku",
+            notify=True,
+        )
+        mock_sdk, mock_memory = self._make_sdk_modules("some result")
+        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+            with caplog.at_level(logging.WARNING, logger="src.cron"):
+                await _execute_job(
+                    job=job,
+                    agent_dir="/tmp/test",
+                    agent_name="worker",
+                    bus=bus,
+                    chat_id=0,
+                    notify_agent_name=None,
+                )
+
+        assert any(
+            "chat_id=0" in r.message and "FOUNDER_TELEGRAM_ID" in r.message
+            for r in caplog.records
+        ), "Ожидался warning про chat_id=0 в логе"
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_chat_id_nonzero(self, caplog):
+        """chat_id != 0 → warning НЕ должен логироваться."""
+        import logging
+        import sys
+
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+
+        job = CronJob(
+            name="daily_digest",
+            schedule="* * * * *",
+            prompt="test prompt",
+            model="haiku",
+            notify=True,
+        )
+        mock_sdk, mock_memory = self._make_sdk_modules("some result")
+        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+            with caplog.at_level(logging.WARNING, logger="src.cron"):
+                await _execute_job(
+                    job=job,
+                    agent_dir="/tmp/test",
+                    agent_name="me",
+                    bus=bus,
+                    chat_id=99999,
+                    notify_agent_name=None,
+                )
+
+        zero_warnings = [
+            r for r in caplog.records if "chat_id=0" in r.message
+        ]
+        assert not zero_warnings
+
+
+class TestFounderChatIdFallback:
+    """Тесты fallback-цепочки _founder_chat_id."""
+
+    def test_env_var_takes_priority(self, tmp_path, monkeypatch):
+        """Env var задан → возвращаем его значение."""
+        monkeypatch.setenv("FOUNDER_TELEGRAM_ID", "111222333")
+        from src.main import _founder_chat_id
+        assert _founder_chat_id(tmp_path) == 111222333
+
+    def test_fallback_from_settings_json(self, tmp_path, monkeypatch):
+        """Env var не задан, telegram_id в settings.json → fallback работает."""
+        monkeypatch.delenv("FOUNDER_TELEGRAM_ID", raising=False)
+
+        settings_dir = tmp_path / "agents" / "me" / "memory"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text(
+            '{"telegram_id": 987654321, "language": "ru"}',
+            encoding="utf-8",
+        )
+
+        from src.main import _founder_chat_id
+        assert _founder_chat_id(tmp_path) == 987654321
+
+    def test_fallback_from_settings_json_chat_id_key(self, tmp_path, monkeypatch):
+        """Env var не задан, ключ chat_id в settings.json → fallback работает."""
+        monkeypatch.delenv("FOUNDER_TELEGRAM_ID", raising=False)
+
+        settings_dir = tmp_path / "agents" / "me" / "memory"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text(
+            '{"chat_id": 555000111}',
+            encoding="utf-8",
+        )
+
+        from src.main import _founder_chat_id
+        assert _founder_chat_id(tmp_path) == 555000111
+
+    def test_fallback_from_profile_md(self, tmp_path, monkeypatch):
+        """Env var не задан, telegram_id в profile.md → fallback работает."""
+        monkeypatch.delenv("FOUNDER_TELEGRAM_ID", raising=False)
+
+        profile_dir = tmp_path / "agents" / "me" / "memory"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "profile.md").write_text(
+            "# Профиль\n\n- **telegram_id:** 777888999\n",
+            encoding="utf-8",
+        )
+
+        from src.main import _founder_chat_id
+        assert _founder_chat_id(tmp_path) == 777888999
+
+    def test_settings_json_takes_precedence_over_profile_md(self, tmp_path, monkeypatch):
+        """Оба файла существуют → settings.json приоритетнее profile.md."""
+        monkeypatch.delenv("FOUNDER_TELEGRAM_ID", raising=False)
+
+        mem_dir = tmp_path / "agents" / "me" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "settings.json").write_text(
+            '{"telegram_id": 100200300}', encoding="utf-8"
+        )
+        (mem_dir / "profile.md").write_text(
+            "- telegram_id: 999888777\n", encoding="utf-8"
+        )
+
+        from src.main import _founder_chat_id
+        assert _founder_chat_id(tmp_path) == 100200300
+
+    def test_no_fallback_returns_zero_with_warning(self, tmp_path, monkeypatch, caplog):
+        """Ни env, ни файлы → 0 + warning в лог."""
+        import logging
+
+        monkeypatch.delenv("FOUNDER_TELEGRAM_ID", raising=False)
+        assert not (tmp_path / "agents").exists()
+
+        from src.main import _founder_chat_id
+        with caplog.at_level(logging.WARNING):
+            result = _founder_chat_id(tmp_path)
+
+        assert result == 0
+        assert any(
+            "FOUNDER_TELEGRAM_ID" in r.message for r in caplog.records
+        ), "Ожидался warning про FOUNDER_TELEGRAM_ID"
+
+    def test_env_var_invalid_falls_through_to_file(self, tmp_path, monkeypatch):
+        """Env var содержит нечисловое значение → falls through к settings.json."""
+        monkeypatch.setenv("FOUNDER_TELEGRAM_ID", "not-a-number")
+
+        mem_dir = tmp_path / "agents" / "me" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "settings.json").write_text(
+            '{"telegram_id": 123456789}', encoding="utf-8"
+        )
+
+        from src.main import _founder_chat_id
+        assert _founder_chat_id(tmp_path) == 123456789
