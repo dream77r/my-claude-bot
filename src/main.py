@@ -36,6 +36,18 @@ def _master_notify_chat_id(agent: "Agent") -> int:
     except ValueError:
         return 0
 
+
+def _founder_chat_id() -> int:
+    """Return FOUNDER_TELEGRAM_ID as int, or 0 if not set/invalid.
+
+    Used for background notifications that must reach the founder regardless
+    of which agent (master or worker) generated them.
+    """
+    try:
+        return int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+    except ValueError:
+        return 0
+
 from . import memory
 from .agent import Agent
 from .agent_manager import AgentManager
@@ -276,10 +288,22 @@ class FleetRuntime:
 
         # Cron
         if agent.config.get("cron"):
+            # Worker-агенты не имеют прямого чата с пользователем (chat_id=0).
+            # Уведомления маршрутизируем через мастер-агента: находим его в
+            # self.agents и передаём имя как notify_agent_name.
+            if agent.is_master:
+                cron_chat_id = _master_notify_chat_id(agent)
+                cron_notify_agent = None
+            else:
+                cron_chat_id = _founder_chat_id()
+                cron_notify_agent = next(
+                    (n for n, a in self.agents.items() if a.is_master), None
+                )
             cron_task = asyncio.create_task(
                 cron_loop(
                     agent.config, agent.agent_dir, agent.name, bus=self.bus,
-                    chat_id=_master_notify_chat_id(agent),
+                    chat_id=cron_chat_id,
+                    notify_agent_name=cron_notify_agent,
                 )
             )
             agent_tasks.append(cron_task)
@@ -731,15 +755,29 @@ async def async_main() -> None:
                 )
 
     # ── Cron ──
+    # Определяем мастер-агента один раз — worker-агенты маршрутизируют
+    # уведомления через его telegram-бота (у них нет прямого chat_id).
+    _master_agent = next((a for a in agents if a.is_master), None)
+    _master_name = _master_agent.name if _master_agent else None
+
     for agent in agents:
         if agent.config.get("cron"):
+            # Worker-агенты: берём FOUNDER_TELEGRAM_ID и маршрутизируем через
+            # мастера, потому что у worker-агентов chat_id=0 (нет прямого чата).
+            if agent.is_master:
+                cron_chat_id = _master_notify_chat_id(agent)
+                cron_notify_agent = None
+            else:
+                cron_chat_id = _founder_chat_id()
+                cron_notify_agent = _master_name
             cron_task = asyncio.create_task(
                 cron_loop(
                     agent.config,
                     agent.agent_dir,
                     agent.name,
                     bus=bus,
-                    chat_id=_master_notify_chat_id(agent),
+                    chat_id=cron_chat_id,
+                    notify_agent_name=cron_notify_agent,
                 )
             )
             if agent.name in runtime.tasks:

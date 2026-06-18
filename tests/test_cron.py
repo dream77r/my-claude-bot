@@ -1,10 +1,13 @@
 """Тесты для cron.py."""
 
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
-from src.cron import CronJob, load_cron_jobs, parse_cron_field, should_run
+from src.cron import CronJob, _execute_job, load_cron_jobs, parse_cron_field, should_run
+from src.bus import FleetBus, FleetMessage, MessageType
 
 
 class TestParseCronField:
@@ -122,3 +125,163 @@ class TestLoadCronJobs:
         }
         jobs = load_cron_jobs(config)
         assert len(jobs) == 2
+
+
+class TestExecuteJobNotificationRouting:
+    """Тесты маршрутизации уведомлений из _execute_job.
+
+    Проверяем что:
+    - мастер-агент шлёт в telegram:{agent_name} (нет notify_agent_name)
+    - worker-агент шлёт в telegram:{notify_agent_name} (мастер)
+    - chat_id=0 → сообщение уходит, но bus-listener его дропнет
+    - notify=False → сообщений нет
+    """
+
+    def _make_job(self, notify: bool = True) -> CronJob:
+        return CronJob(
+            name="test_job",
+            schedule="* * * * *",
+            prompt="Say hello",
+            model="haiku",
+            notify=notify,
+        )
+
+    def _make_sdk_modules(self, text: str):
+        """Создаём mock-объекты claude_agent_sdk + src.memory.
+
+        _execute_job использует lazy imports:
+          from claude_agent_sdk import AssistantMessage, ... query
+          from . import memory
+        Поэтому патчим через sys.modules.
+        """
+        import claude_agent_sdk as real_sdk  # убеждаемся, что SDK загружен
+
+        # Используем НАСТОЯЩИЕ классы SDK — иначе isinstance-проверки в
+        # _execute_job провалятся и result_text останется пустым.
+        real_msg = real_sdk.AssistantMessage(
+            content=[real_sdk.TextBlock(text=text)],
+            model="haiku",
+            session_id="test-session",
+        )
+
+        async def _fake_query(**kwargs):
+            yield real_msg
+
+        mock_sdk = MagicMock()
+        mock_sdk.AssistantMessage = real_sdk.AssistantMessage
+        mock_sdk.ResultMessage = real_sdk.ResultMessage
+        mock_sdk.TextBlock = real_sdk.TextBlock
+        mock_sdk.ClaudeAgentOptions = real_sdk.ClaudeAgentOptions
+        mock_sdk.query = lambda **kw: _fake_query(**kw)
+
+        # --- mock src.memory ---
+        mock_memory = MagicMock()
+        mock_memory.get_memory_path.return_value = "/tmp/test"
+        mock_memory.git_commit = MagicMock()
+
+        return mock_sdk, mock_memory
+
+    @pytest.mark.asyncio
+    async def test_master_agent_routes_to_own_channel(self):
+        """Мастер-агент: target=telegram:{agent_name}."""
+        import sys
+
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+
+        job = self._make_job()
+        mock_sdk, mock_memory = self._make_sdk_modules("Digest result")
+        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="me",
+                bus=bus,
+                chat_id=12345,
+                notify_agent_name=None,  # мастер: без переопределения
+            )
+
+        # После выполнения сообщение должно быть в очереди
+        assert not bus._queues["telegram:me"].empty()
+        msg = bus._queues["telegram:me"].get_nowait()
+        assert msg.target == "telegram:me"
+        assert msg.chat_id == 12345
+        assert "Digest result" in msg.content
+
+    @pytest.mark.asyncio
+    async def test_worker_agent_routes_to_master_channel(self):
+        """Worker-агент: target=telegram:me (notify_agent_name='me')."""
+        import sys
+
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+
+        job = self._make_job()
+        mock_sdk, mock_memory = self._make_sdk_modules("Worker cron result")
+        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="analyst",  # worker-агент
+                bus=bus,
+                chat_id=99999,          # FOUNDER_TELEGRAM_ID
+                notify_agent_name="me", # маршрутизируем через мастера
+            )
+
+        assert not bus._queues["telegram:me"].empty()
+        msg = bus._queues["telegram:me"].get_nowait()
+        assert msg.target == "telegram:me"
+        assert msg.chat_id == 99999
+        assert msg.source == "agent:analyst"
+
+    @pytest.mark.asyncio
+    async def test_zero_chat_id_message_goes_to_own_channel(self):
+        """chat_id=0 без notify_agent_name → идёт в telegram:analyst.
+
+        Bus-listener дропнет его (chat_id=0), но в telegram:me ничего нет.
+        """
+        import sys
+
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+        bus.subscribe("telegram:analyst")
+
+        job = self._make_job()
+        mock_sdk, mock_memory = self._make_sdk_modules("some result")
+        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="analyst",
+                bus=bus,
+                chat_id=0,
+                notify_agent_name=None,  # не перенаправляем — уйдёт в telegram:analyst
+            )
+
+        # В telegram:me — пусто, в telegram:analyst — пришло с chat_id=0
+        assert bus._queues["telegram:me"].empty()
+        assert not bus._queues["telegram:analyst"].empty()
+        msg = bus._queues["telegram:analyst"].get_nowait()
+        assert msg.chat_id == 0
+
+    @pytest.mark.asyncio
+    async def test_notify_false_no_message_sent(self):
+        """notify=False → никаких публикаций."""
+        import sys
+
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+
+        job = self._make_job(notify=False)
+        mock_sdk, mock_memory = self._make_sdk_modules("silent result")
+        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="analyst",
+                bus=bus,
+                chat_id=99999,
+                notify_agent_name="me",
+            )
+
+        assert bus._queues["telegram:me"].empty()

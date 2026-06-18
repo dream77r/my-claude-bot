@@ -125,8 +125,17 @@ async def _execute_job(
     agent_name: str,
     bus: FleetBus | None = None,
     chat_id: int = 0,
+    notify_agent_name: str | None = None,
 ) -> None:
-    """Выполнить одну cron-задачу."""
+    """Выполнить одну cron-задачу.
+
+    Args:
+        notify_agent_name: имя агента для маршрутизации уведомлений.
+            Если задан — сообщение отправляется в telegram:{notify_agent_name},
+            иначе — в telegram:{agent_name}. Используется для worker-агентов,
+            у которых нет прямого chat_id с пользователем: уведомление
+            доставляется через telegram-бота мастер-агента.
+    """
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
@@ -170,9 +179,12 @@ async def _execute_job(
 
     # Уведомить если нужно
     if job.notify and bus and result_text:
+        # Worker-агенты не имеют прямого чата с пользователем (chat_id=0).
+        # Маршрутизируем через мастер-агента, если notify_agent_name задан.
+        target_agent = notify_agent_name or agent_name
         notification = FleetMessage(
             source=f"agent:{agent_name}",
-            target=f"telegram:{agent_name}",
+            target=f"telegram:{target_agent}",
             content=f"[{job.name}]\n\n{result_text}",
             msg_type=MessageType.OUTBOUND,
             chat_id=chat_id,
@@ -186,6 +198,7 @@ async def cron_loop(
     agent_name: str,
     bus: FleetBus | None = None,
     chat_id: int = 0,
+    notify_agent_name: str | None = None,
 ) -> None:
     """
     Бесконечный цикл проверки cron-задач каждую минуту.
@@ -196,6 +209,9 @@ async def cron_loop(
         agent_name: имя агента
         bus: шина сообщений
         chat_id: ID чата для уведомлений
+        notify_agent_name: имя агента для маршрутизации уведомлений.
+            Для worker-агентов задайте имя мастер-агента, чтобы уведомления
+            отправлялись через его telegram-бота (у worker chat_id=0).
     """
     jobs = load_cron_jobs(config)
     if not jobs:
@@ -220,7 +236,10 @@ async def cron_loop(
                     # spawn_supervised: keep strong ref + log exceptions,
                     # иначе провал cron-джобы уходит в тишину.
                     spawn_supervised(
-                        _execute_job(job, agent_dir, agent_name, bus, chat_id),
+                        _execute_job(
+                            job, agent_dir, agent_name, bus, chat_id,
+                            notify_agent_name,
+                        ),
                         name=f"cron:{agent_name}:{job.name}",
                     )
 
