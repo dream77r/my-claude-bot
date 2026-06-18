@@ -1103,7 +1103,30 @@ class TelegramBridge(
                 msg = await self.bus.consume(queue_name)
                 chat_id = msg.chat_id
                 if not chat_id:
-                    continue
+                    # Fallback: попытаться получить FOUNDER_TELEGRAM_ID
+                    # (используется для cron/reminder-уведомлений от worker-агентов)
+                    try:
+                        founder_id = int(os.environ.get("FOUNDER_TELEGRAM_ID", "0") or "0")
+                        if founder_id:
+                            chat_id = founder_id
+                            logger.debug(
+                                f"Bus message: используем fallback chat_id={founder_id} "
+                                f"(FOUNDER_TELEGRAM_ID)"
+                            )
+                        else:
+                            # Ни FOUNDER_TELEGRAM_ID не установлен, ни сообщение не имеет chat_id
+                            logger.warning(
+                                f"Bus message: chat_id=0 и FOUNDER_TELEGRAM_ID не установлен, "
+                                f"сообщение пропущено. "
+                                f"Установите FOUNDER_TELEGRAM_ID=<ваш_telegram_id> в .env"
+                            )
+                            continue
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            f"Bus message: невалидный FOUNDER_TELEGRAM_ID, "
+                            f"сообщение пропущено"
+                        )
+                        continue
 
                 event = msg.metadata.get("event", "")
                 thread_id = msg.metadata.get("message_thread_id")

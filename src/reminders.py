@@ -182,6 +182,12 @@ async def _fire_reminder(
     chat_id: int,
 ) -> None:
     """Опубликовать напоминание как входящее сообщение агенту через bus."""
+    if not chat_id:
+        logger.warning(
+            f"Reminders '{reminder['id'][:8]}': chat_id=0, напоминание может не быть доставлено. "
+            f"Установите FOUNDER_TELEGRAM_ID в .env"
+        )
+
     msg = FleetMessage(
         source=f"reminders:{agent_name}",
         target=f"telegram:{agent_name}",
