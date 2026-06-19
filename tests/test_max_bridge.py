@@ -214,3 +214,80 @@ class TestOutbound:
         with patch("src.max_bridge.memory.log_message"):
             await bridge._dispatch_outbound(msg)
         assert bridge._bot.send_message.await_count == 3
+
+
+# ── Индикаторы «прочитано / печатает…» (отзывчивость) ──
+
+_FAKE_ACTION = SimpleNamespace(TYPING_ON="typing_on", MARK_SEEN="mark_seen")
+
+
+class TestTypingIndicator:
+    @pytest.mark.asyncio
+    async def test_processing_started_seen_and_starts_typing_loop(self, bridge):
+        bridge._bot = MagicMock()
+        bridge._bot.send_action = AsyncMock()
+        msg = FleetMessage(
+            source="agent:test", target="max:test", content="",
+            msg_type=MessageType.SYSTEM, chat_id=555,
+            metadata={"event": "processing_started"},
+        )
+        with patch("src.max_bridge._SenderAction", _FAKE_ACTION):
+            await bridge._dispatch_outbound(msg)
+            # read-receipt отправлен синхронно
+            seen = [c.kwargs["action"] for c in bridge._bot.send_action.await_args_list]
+            assert "mark_seen" in seen
+            # фоновый таймер «печатает…» запущен для этого чата
+            assert 555 in bridge._typing_tasks
+            # дать таймеру один тик — он шлёт TYPING_ON
+            await asyncio.sleep(0.01)
+            actions = [c.kwargs["action"] for c in bridge._bot.send_action.await_args_list]
+            assert "typing_on" in actions
+            bridge._stop_typing(555)  # cleanup
+
+    @pytest.mark.asyncio
+    async def test_response_stops_typing_loop(self, bridge):
+        bridge._bot = MagicMock()
+        bridge._bot.send_action = AsyncMock()
+        bridge._bot.send_message = AsyncMock()
+        with patch("src.max_bridge._SenderAction", _FAKE_ACTION), \
+                patch("src.max_bridge.memory.log_message"):
+            bridge._start_typing(555)
+            assert 555 in bridge._typing_tasks
+            resp = FleetMessage(
+                source="agent:test", target="max:test", content="готово",
+                msg_type=MessageType.OUTBOUND, chat_id=555,
+                metadata={"event": "response"},
+            )
+            await bridge._dispatch_outbound(resp)
+        # финальный ответ погасил таймер
+        assert 555 not in bridge._typing_tasks
+
+    @pytest.mark.asyncio
+    async def test_system_event_sends_no_text(self, bridge):
+        bridge._bot = MagicMock()
+        bridge._bot.send_message = AsyncMock()
+        bridge._bot.send_action = AsyncMock()
+        msg = FleetMessage(
+            source="agent:test", target="max:test", content="служебное",
+            msg_type=MessageType.SYSTEM, chat_id=555,
+            metadata={"event": "processing_started"},
+        )
+        with patch("src.max_bridge._SenderAction", _FAKE_ACTION):
+            await bridge._dispatch_outbound(msg)
+            bridge._stop_typing(555)
+        bridge._bot.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_typing_when_sdk_absent(self, bridge):
+        # _SenderAction=None (maxapi не установлен) → таймер не стартует, без падений.
+        bridge._bot = MagicMock()
+        bridge._bot.send_action = AsyncMock()
+        msg = FleetMessage(
+            source="agent:test", target="max:test", content="",
+            msg_type=MessageType.SYSTEM, chat_id=555,
+            metadata={"event": "processing_started"},
+        )
+        with patch("src.max_bridge._SenderAction", None):
+            await bridge._dispatch_outbound(msg)
+        assert 555 not in bridge._typing_tasks
+        bridge._bot.send_action.assert_not_awaited()

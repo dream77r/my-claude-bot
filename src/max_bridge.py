@@ -30,6 +30,22 @@ from . import memory
 from .bus import FleetBus, FleetMessage, MessageType
 from .file_handler import clear_outbox
 
+# Enum действий отправителя (TYPING_ON / MARK_SEEN). maxapi — опциональная
+# зависимость: импорт под guard, чтобы модуль грузился и без SDK (в тестах).
+try:
+    from maxapi.enums import SenderAction as _SenderAction
+except Exception:  # ImportError или сбой импорта SDK
+    _SenderAction = None
+
+# TYPING_ON в МАКС гаснет сам через ~5с. Фоновый таймер пере-шлёт его каждые
+# TYPING_LOOP_SEC, чтобы «печатает…» держалось весь ход — включая «молчаливую»
+# фазу размышления, когда от агента ещё нет ни текста, ни tool-событий
+# (именно там индикатор гас и выглядел как зависание).
+TYPING_LOOP_SEC = 3.0
+# Предохранитель: максимум итераций фонового таймера (~5 мин), чтобы он не
+# крутился вечно, если финальный ответ почему-то не придёт.
+TYPING_MAX_ITERS = 100
+
 logger = logging.getLogger(__name__)
 
 # Лимит длины текстового сообщения МАКС (с запасом). Длинные ответы режем.
@@ -91,6 +107,8 @@ class MaxBridge:
         self._bot = None
         self._dp = None
         self._running = False
+        # chat_id → фоновая задача, держащая «печатает…» живым на время хода
+        self._typing_tasks: dict[int, asyncio.Task] = {}
 
     # ── Lifecycle ──
 
@@ -131,6 +149,8 @@ class MaxBridge:
         finally:
             self._running = False
             listener_task.cancel()
+            for chat_id in list(self._typing_tasks):
+                self._stop_typing(chat_id)
             await self._close_bot(bot)
 
     @staticmethod
@@ -186,8 +206,16 @@ class MaxBridge:
             return
 
         if not text or not str(text).strip():
+            logger.info(
+                f"MaxBridge '{self.agent.name}': пустой текст — пропуск "
+                "(не-текстовое сообщение?)"
+            )
             return  # v1: обрабатываем только текст
         text = str(text)
+        logger.info(
+            f"MaxBridge '{self.agent.name}': входящее от user={user_id_raw} "
+            f"chat={chat_id_raw}"
+        )
 
         # Контроль доступа: повторяем семантику Telegram (allowed_users).
         # Fail-closed: если список ограничен, а отправителя определить не
@@ -248,20 +276,35 @@ class MaxBridge:
                 logger.error(f"MAX bus listener error ({self.agent.name}): {exc}")
 
     async def _dispatch_outbound(self, msg: FleetMessage) -> None:
-        """Отправить одно outbound-сообщение в МАКС.
+        """Обработать одно сообщение из шины для МАКС.
 
-        Пересылаем только user-facing терминальные сообщения (OUTBOUND):
-        финальный ответ, ошибки, уведомления cron/heartbeat/delegation.
-        Стриминговые SYSTEM-события опускаем — в v1 без live-редактирования.
+        - SYSTEM-события хода (processing_started / tool_use / text_delta) →
+          индикаторы «прочитано» + «печатает…» (без live-редактирования текста).
+          Так пользователь сразу видит, что сообщение принято и бот работает.
+        - OUTBOUND (финальный ответ, ошибки, уведомления) → отправляем текст
+          (и файлы) в чат.
         """
+        chat_id = msg.chat_id
+        event = msg.metadata.get("event", "")
+
+        # SYSTEM: на старте хода — «прочитано» + запуск фонового «печатает…».
+        # Прочие SYSTEM-события (tool_use/text_delta/queued) игнорим: индикатор
+        # держит фоновый таймер, а не отдельные события.
+        if msg.msg_type == MessageType.SYSTEM:
+            if chat_id and event == "processing_started":
+                await self._send_seen(chat_id)
+                self._start_typing(chat_id)
+            return
+
         if msg.msg_type != MessageType.OUTBOUND:
             return
-        chat_id = msg.chat_id
         if not chat_id:
             logger.warning(
                 f"MaxBridge '{self.agent.name}': outbound без chat_id — пропуск"
             )
             return
+
+        self._stop_typing(chat_id)  # ход завершён — гасим «печатает…»
 
         text = msg.content or ""
         if text.strip():
@@ -279,6 +322,50 @@ class MaxBridge:
             agent_dir = msg.metadata.get("agent_dir")
             if agent_dir:
                 clear_outbox(agent_dir)
+
+    async def _send_seen(self, chat_id: int) -> None:
+        """Отметить входящее как прочитанное (read-receipt)."""
+        if self._bot is None or _SenderAction is None:
+            return
+        try:
+            await self._bot.send_action(
+                chat_id=chat_id, action=_SenderAction.MARK_SEEN
+            )
+        except Exception as exc:
+            logger.debug(f"MaxBridge send_action(MARK_SEEN) error: {exc}")
+
+    def _start_typing(self, chat_id: int) -> None:
+        """Запустить фоновый таймер «печатает…» для чата (заменяя прежний)."""
+        self._stop_typing(chat_id)
+        if self._bot is None or _SenderAction is None:
+            return
+        self._typing_tasks[chat_id] = asyncio.create_task(
+            self._typing_loop(chat_id)
+        )
+
+    def _stop_typing(self, chat_id: int) -> None:
+        """Остановить фоновый таймер «печатает…» для чата."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    async def _typing_loop(self, chat_id: int) -> None:
+        """Держать «печатает…» живым: TYPING_ON каждые TYPING_LOOP_SEC.
+
+        Первый TYPING_ON шлётся сразу, затем — пока ход не завершится (таймер
+        отменяют в _stop_typing) или пока не упрёмся в TYPING_MAX_ITERS.
+        """
+        try:
+            for _ in range(TYPING_MAX_ITERS):
+                try:
+                    await self._bot.send_action(
+                        chat_id=chat_id, action=_SenderAction.TYPING_ON
+                    )
+                except Exception as exc:
+                    logger.debug(f"MaxBridge send_action(TYPING_ON) error: {exc}")
+                await asyncio.sleep(TYPING_LOOP_SEC)
+        except asyncio.CancelledError:
+            pass
 
     async def _send_text(self, chat_id: int, text: str) -> None:
         """Отправить текст в чат МАКС (с разбивкой длинных сообщений)."""
