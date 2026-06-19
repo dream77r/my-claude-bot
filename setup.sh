@@ -250,6 +250,12 @@ echo -e "${BOLD}Installing Python packages...${RESET}"
 python3 -m pip install --user -q claude-agent-sdk python-telegram-bot python-dotenv pyyaml httpx 2>&1 | tail -3
 echo -e "${GREEN}  ✓ Python packages installed${RESET}"
 
+# Активировать pre-commit secret-guard (не даёт закоммитить .env/токен)
+if [ -x scripts/git-hooks/pre-commit ] && git rev-parse --git-dir &>/dev/null; then
+    git config core.hooksPath scripts/git-hooks
+    echo -e "${GREEN}  ✓ Git secret-guard hook активирован${RESET}"
+fi
+
 # Очистка qmd от предыдущих версий (если был установлен)
 if [ -e "$HOME/.local/bin/qmd" ] || [ -d "$HOME/.cache/qmd" ]; then
     echo -e "${BOLD}Cleaning up qmd (replaced by built-in wiki search)...${RESET}"

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# pre-commit secret guard — не даёт случайно закоммитить секреты или .env.
+#
+# Активируется через `git config core.hooksPath scripts/git-hooks`
+# (это делают setup.sh и update.sh автоматически). Идемпотентно.
+#
+# Осознанно обойти (если ложное срабатывание):  git commit --no-verify
+set -u
+
+RED='\033[31m'; YEL='\033[33m'; DIM='\033[2m'; RST='\033[0m'
+fail=0
+
+# ── 1. Запрещённые по ИМЕНИ файлы среди застейдженных ───────────────────────
+# .env и приватные ключи не должны попадать в git вообще. .env.example — ок.
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    base="${f##*/}"
+    case "$base" in
+        .env.example) : ;;                                   # шаблон — разрешён
+        .env|.env.local|.env.*|*.pem|*.key|id_rsa|id_ed25519)
+            echo -e "${RED}✗ Секретный файл в коммите:${RST} $f"
+            fail=1 ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# ── 2. Секрет-паттерны в ДОБАВЛЕННЫХ строках ────────────────────────────────
+# Паттерны нарочно «узкие» (длина/формат), чтобы doc-примеры вроде `sk-` или
+# `AKIA` в чеклистах не давали ложных срабатываний. Сам хук исключён из скана.
+PATTERNS='([0-9]{8,10}:[A-Za-z0-9_-]{35})'        # Telegram bot token
+PATTERNS+='|(sk-(ant-)?[A-Za-z0-9_-]{20,})'       # OpenAI / Anthropic
+PATTERNS+='|(gh[pousr]_[A-Za-z0-9]{36})'          # GitHub PAT
+PATTERNS+='|(AKIA[0-9A-Z]{16})'                   # AWS access key id
+PATTERNS+='|(xox[baprs]-[A-Za-z0-9-]{10,})'       # Slack
+PATTERNS+='|(glpat-[A-Za-z0-9_-]{20,})'           # GitLab PAT
+PATTERNS+='|(-----BEGIN [A-Z ]*PRIVATE KEY-----)' # PEM private key
+
+hits=$(git diff --cached --diff-filter=ACM -U0 -- . ':(exclude)scripts/git-hooks/**' \
+    | grep -E '^\+' | grep -vE '^\+\+\+' \
+    | grep -nE "$PATTERNS" || true)
+
+if [ -n "$hits" ]; then
+    echo -e "${RED}✗ Похоже на секрет в изменениях:${RST}"
+    printf '%s\n' "$hits" | head -20 | while IFS= read -r l; do
+        echo -e "    ${DIM}${l}${RST}"
+    done
+    fail=1
+fi
+
+if [ "$fail" -eq 1 ]; then
+    echo ""
+    echo -e "${YEL}Коммит остановлен pre-commit guard'ом.${RST}"
+    echo "Вынеси значение в .env (он в .gitignore), либо — если это точно"
+    echo "ложное срабатывание — повтори с обходом:  git commit --no-verify"
+    exit 1
+fi
+exit 0

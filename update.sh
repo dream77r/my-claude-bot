@@ -96,6 +96,13 @@ if ! git rev-parse --git-dir &>/dev/null 2>&1; then
     exit 1
 fi
 
+# Активировать pre-commit secret-guard (идемпотентно). Хук лежит в репо
+# (scripts/git-hooks/) и не даёт случайно закоммитить .env или токен.
+if [ -x scripts/git-hooks/pre-commit ] && \
+   [ "$(git config --get core.hooksPath || true)" != "scripts/git-hooks" ]; then
+    git config core.hooksPath scripts/git-hooks
+fi
+
 # ══════════════════════════════════════════
 # Текущая версия
 # ══════════════════════════════════════════
@@ -313,7 +320,10 @@ _add_env_key() {
     fi
 }
 
-_add_env_key "BUG_REPORT_CHAT_ID" "-1003998514795" "Канал для баг-репортов (@mcb-bugs)"
+# BUG_REPORT_CHAT_ID намеренно НЕ сидируется: канал — это решение оператора.
+# Если ключ не задан в .env, скилл bugreport шлёт отчёт в личку владельцу
+# (${BUG_REPORT_CHAT_ID:-$FOUNDER_TELEGRAM_ID}). Свой канал/группу можно
+# прописать вручную (см. .env.example). Так публичные клоны не пишут в чужой чат.
 
 if [ "$ENV_UPDATED" -eq 0 ]; then
     echo -e "${GREEN}  ✓ .env up to date${RESET}"
