@@ -661,6 +661,31 @@ class Agent:
             return soul_path.read_text(encoding="utf-8")
         return ""
 
+    def _load_fleet_knowledge(self) -> str:
+        """
+        Загрузить общефлотовые факты, общие для ВСЕХ агентов.
+
+        Source of truth — `fleet_knowledge.md` в корне репозитория (трекается
+        git'ом → распространяется на весь флот и на все клоны одним `git pull`).
+        Опциональный `fleet_knowledge.local.md` (untracked) добавляет факты
+        конкретной инсталляции без merge-конфликтов — так же, как
+        `agent.local.yaml` оверлеит `agent.yaml`.
+
+        Назначение: единое место, где правится фактура, которая в обучающих
+        данных модели устарела (ставки налогов, изменения в законах и т.п.),
+        чтобы не чинить это в каждом агенте по отдельности.
+        """
+        # agent_dir == agents/{name}; корень репозитория двумя уровнями выше.
+        fleet_root = Path(self.agent_dir).parent.parent
+        parts: list[str] = []
+        for fname in ("fleet_knowledge.md", "fleet_knowledge.local.md"):
+            path = fleet_root / fname
+            if path.exists():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    parts.append(text)
+        return "\n\n".join(parts)
+
     def _build_fleet_context(self) -> str:
         """
         Описать подчинённых агентов для делегации.
@@ -871,6 +896,11 @@ class Agent:
         if soul:
             parts.append(soul)
 
+        # 1.5. Общефлотовые факты (приоритет над устаревшими обучающими данными)
+        knowledge = self._load_fleet_knowledge()
+        if knowledge:
+            parts.append(knowledge)
+
         # 2. System prompt из agent.yaml
         if self.system_prompt_template:
             parts.append(self.system_prompt_template)
@@ -929,6 +959,11 @@ class Agent:
         soul = self._load_soul()
         if soul:
             parts.append(soul)
+
+        # 1.5. Общефлотовые факты (приоритет над устаревшими обучающими данными)
+        knowledge = self._load_fleet_knowledge()
+        if knowledge:
+            parts.append(knowledge)
 
         # 2. System prompt из agent.yaml (общий)
         if self.system_prompt_template:

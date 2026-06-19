@@ -158,6 +158,39 @@ class TestBuildGroupSystemPrompt:
         assert "бридж" in prompt.lower()
 
 
+class TestFleetKnowledge:
+    """fleet_knowledge.md в корне репозитория — общефлотовые факты, которые
+    инъектятся в system prompt КАЖДОГО агента (личные и групповые чаты)."""
+
+    def test_injected_into_personal_prompt(self, agent, tmp_path):
+        (tmp_path / "fleet_knowledge.md").write_text(
+            "## Налоги\n- НДС в РФ — 22% с 2026 года.", encoding="utf-8"
+        )
+        prompt = agent.build_system_prompt()
+        assert "НДС в РФ — 22%" in prompt
+
+    def test_injected_into_group_prompt(self, agent, tmp_path):
+        (tmp_path / "fleet_knowledge.md").write_text(
+            "## Налоги\n- НДС в РФ — 22% с 2026 года.", encoding="utf-8"
+        )
+        prompt = agent.build_group_system_prompt(chat_id=-100123)
+        assert "НДС в РФ — 22%" in prompt
+
+    def test_local_overlay_appended(self, agent, tmp_path):
+        (tmp_path / "fleet_knowledge.md").write_text("базовый факт", encoding="utf-8")
+        (tmp_path / "fleet_knowledge.local.md").write_text(
+            "локальный факт инсталляции", encoding="utf-8"
+        )
+        knowledge = agent._load_fleet_knowledge()
+        assert "базовый факт" in knowledge
+        assert "локальный факт инсталляции" in knowledge
+
+    def test_absent_file_is_noop(self, agent, tmp_path):
+        # Ни одного fleet_knowledge файла → пусто, промпт собирается без ошибок.
+        assert agent._load_fleet_knowledge() == ""
+        assert agent.build_system_prompt()  # не падает
+
+
 class TestParseAllowedTools:
     def test_parses_tools(self, agent):
         tools = agent._parse_allowed_tools()
