@@ -90,6 +90,59 @@ class TestExpandVars:
             del os.environ["TEST_USER_ID"]
 
 
+class TestMaxBotToken:
+    """Опциональный транспорт МАКС — резолв max_bot_token."""
+
+    def _write(self, tmp_path, name, extra=None):
+        agent_dir = tmp_path / "agents" / name
+        agent_dir.mkdir(parents=True)
+        config = {"name": name, "bot_token": "123:ABC"}
+        if extra:
+            config.update(extra)
+        yaml_path = agent_dir / "agent.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(config, f, allow_unicode=True)
+        return str(yaml_path)
+
+    def test_none_when_not_configured(self, tmp_path):
+        # Ни yaml-поля, ни env-переменной {NAME}_MAX_BOT_TOKEN → None.
+        os.environ.pop("NOMAX_MAX_BOT_TOKEN", None)
+        agent = Agent(self._write(tmp_path, "nomax"))
+        assert agent.max_bot_token is None
+
+    def test_explicit_yaml_value(self, tmp_path):
+        agent = Agent(self._write(tmp_path, "exp", {"max_bot_token": "max-tok-1"}))
+        assert agent.max_bot_token == "max-tok-1"
+
+    def test_autoderive_from_env_by_name(self, tmp_path):
+        # Включение МАКСа без правки yaml — только переменная в окружении.
+        os.environ["AUTO_MAX_BOT_TOKEN"] = "env-max-tok"
+        try:
+            agent = Agent(self._write(tmp_path, "auto"))
+            assert agent.max_bot_token == "env-max-tok"
+        finally:
+            del os.environ["AUTO_MAX_BOT_TOKEN"]
+
+    def test_unexpanded_placeholder_is_none(self, tmp_path):
+        # ${VAR} без заданной env-переменной = «не настроено».
+        os.environ.pop("MISSING_MAX_TOKEN", None)
+        os.environ.pop("PH_MAX_BOT_TOKEN", None)
+        agent = Agent(
+            self._write(tmp_path, "ph", {"max_bot_token": "${MISSING_MAX_TOKEN}"})
+        )
+        assert agent.max_bot_token is None
+
+    def test_yaml_placeholder_expands_from_env(self, tmp_path):
+        os.environ["SOME_MAX_SECRET"] = "expanded-max"
+        try:
+            agent = Agent(
+                self._write(tmp_path, "ph2", {"max_bot_token": "${SOME_MAX_SECRET}"})
+            )
+            assert agent.max_bot_token == "expanded-max"
+        finally:
+            del os.environ["SOME_MAX_SECRET"]
+
+
 class TestIsUserAllowed:
     def test_allowed_user(self, agent):
         assert agent.is_user_allowed(12345) is True

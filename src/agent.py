@@ -87,6 +87,9 @@ class Agent:
         self.display_name: str = self.config.get("display_name", self.name)
         self.role: str = self.config.get("role", "worker")
         self.bot_token: str = self.config["bot_token"]
+        # Опциональный второй транспорт — мессенджер MAX (VK). None если не
+        # настроен; тогда агент живёт только в Telegram. См. _resolve_max_bot_token.
+        self.max_bot_token: str | None = self._resolve_max_bot_token()
         self.system_prompt_template: str = self.config.get("system_prompt", "")
         self.memory_path: str = self.config.get("memory_path", f"./agents/{self.name}/memory/")
         self.skill_names: list[str] = self.config.get("skills", [])
@@ -292,6 +295,25 @@ class Agent:
         merged = _deep_merge(base, local_overlay)
         logger.info(f"Agent config: применён overlay из {local_path.name}")
         return merged
+
+    def _resolve_max_bot_token(self) -> str | None:
+        """Опциональный токен бота МАКС. None, если транспорт не настроен.
+
+        Источники по приоритету:
+        1. Явное поле `max_bot_token` в agent.yaml (после expandvars).
+        2. Авто-вывод из окружения по имени агента: `{NAME}_MAX_BOT_TOKEN`
+           (зеркалит конвенцию `${ME_BOT_TOKEN}` для Telegram). Так включение
+           МАКСа не требует правки user-yaml — достаточно добавить переменную
+           в `.env` и перезапустить.
+
+        Нерасширённый `${...}` (env-переменная не задана) трактуется как
+        «не настроено» — agent остаётся только в Telegram.
+        """
+        explicit = self.config.get("max_bot_token")
+        if explicit and "${" not in explicit:
+            return explicit
+        env_key = f"{self.name.upper()}_MAX_BOT_TOKEN"
+        return os.environ.get(env_key) or None
 
     def _parse_allowed_users(self) -> list[int]:
         """Разобрать список allowed_users, преобразовать в int."""

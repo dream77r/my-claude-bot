@@ -90,6 +90,52 @@ class TestAgentWorker:
         assert len(error_msgs) == 1
         assert "ошибка" in error_msgs[0].content.lower()
 
+    @pytest.mark.asyncio
+    async def test_routes_reply_to_origin_transport_max(self, worker, bus):
+        """Ответ уходит в max:{name}, если входящее помечено transport=max."""
+        bus.subscribe("max:test")
+        bus.subscribe("telegram:test")
+
+        msg = FleetMessage(
+            source="max:555",
+            target="agent:test",
+            content="привет из макса",
+            msg_type=MessageType.INBOUND,
+            chat_id=555,
+            metadata={"transport": "max"},
+        )
+        await worker._handle_message(msg)
+
+        # Все ответы ушли в max:test, ничего — в telegram:test.
+        assert not bus._queues["max:test"].empty()
+        assert bus._queues["telegram:test"].empty()
+        max_msgs = []
+        while not bus._queues["max:test"].empty():
+            max_msgs.append(bus._queues["max:test"].get_nowait())
+        events = [m.metadata.get("event") for m in max_msgs]
+        assert "response" in events
+        resp = [m for m in max_msgs if m.metadata.get("event") == "response"][0]
+        assert resp.content == "Ответ от Claude"
+        assert resp.chat_id == 555
+
+    @pytest.mark.asyncio
+    async def test_routes_reply_to_telegram_by_default(self, worker, bus):
+        """Без metadata['transport'] ответ идёт в telegram:{name} (обратная совместимость)."""
+        bus.subscribe("max:test")
+        bus.subscribe("telegram:test")
+
+        msg = FleetMessage(
+            source="telegram:123",
+            target="agent:test",
+            content="привет",
+            msg_type=MessageType.INBOUND,
+            chat_id=123,
+        )
+        await worker._handle_message(msg)
+
+        assert not bus._queues["telegram:test"].empty()
+        assert bus._queues["max:test"].empty()
+
     def test_cancel_task(self, worker):
         """cancel_task отменяет активную задачу."""
         task = MagicMock()

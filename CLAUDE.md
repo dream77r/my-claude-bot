@@ -36,6 +36,14 @@ There is no linter or formatter configured — follow the style of surrounding c
 - `agent_worker.py::AgentWorker` — per-agent turn executor; holds `_active_tasks`, `_pending_followups` (mid-turn injection buffer).
 - `agent.py::Agent` — dataclass loaded from `agent.yaml`; `agent.bot_token` expands `${ME_BOT_TOKEN}`-style vars.
 - `telegram_bridge.py::TelegramBridge` — PTB `Application` per agent, wires `/stop`, `/restart`, file round-trip, voice, etc.
+- `max_bridge.py::MaxBridge` — опциональный **второй транспорт** (мессенджер МАКС/VK на `maxapi`). Поднимается рядом с Telegram, только если у агента задан `max_bot_token`. См. «Multi-transport» ниже.
+
+**Multi-transport (Telegram + МАКС).** Мозг флота транспортно-нейтрален: телеграм-специфика заперта в `TelegramBridge`. Второй транспорт — МАКС — добавлен как параллельный мост, не ломая Telegram-путь:
+- **Routing.** Каждый bridge помечает входящее `metadata["transport"]` (`telegram` по умолчанию, `max` у MaxBridge). `AgentWorker` шлёт ВСЕ ответы в `f"{transport}:{name}"`, а не хардкодом `telegram:` — ответ уходит туда, откуда пришло. Дефолт `"telegram"` сохраняет полную обратную совместимость.
+- **Включение.** `Agent._resolve_max_bot_token` берёт токен из `max_bot_token` в `agent.yaml` ИЛИ авто-выводит из env `{NAME}_MAX_BOT_TOKEN` (zero-config, без правки user-yaml). Нет токена → мост не поднимается.
+- **Опциональная зависимость.** `maxapi` импортируется лениво в `_maybe_start_max_bridge` (main.py) и в `MaxBridge.run()`. Не установлен → graceful degrade (агент остаётся в Telegram), как `bwrap` для sandbox.
+- **Подписки шины.** `_maybe_start_max_bridge` подписывает `max:{name}`; `stop_agent` отписывает (идемпотентно). Оба пути старта (boot + hot-reload) идут через один хелпер.
+- **v1-объём MaxBridge.** Текст в обе стороны + `allowed_users` (fail-closed) + лог в `memory/`. Стриминговые SYSTEM-события опускаются (один финальный ответ, без live-edit). Исходящие файлы — best-effort пометка + `clear_outbox` (единая точка `_send_files` для реальной загрузки медиа, когда media-API `maxapi` сверен на живом токене). Богатый набор команд (`/stop` и т.п.) — пока только в Telegram.
 
 **HTTP sidecar (`src/http_server.py` + `src/miniapp/`, `src/a2a/`).** A single FastAPI app mounted in the same loop serves:
 - Mini App at `/miniapp/` (static `miniapp/index.html` + `assets/`).

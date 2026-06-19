@@ -209,6 +209,10 @@ class FleetRuntime:
         self.agents: dict[str, Agent] = {}
         self.workers: dict[str, AgentWorker] = {}
         self.bridges: dict[str, TelegramBridge] = {}
+        # MAX-мосты (опциональный второй транспорт). Ключ — имя агента.
+        # Тип намеренно loose: maxapi — опциональная зависимость, не импортим
+        # MaxBridge на уровне модуля, чтобы флот поднимался и без неё.
+        self.max_bridges: dict = {}
         self.tasks: dict[str, list[asyncio.Task]] = {}
 
     def register_running(
@@ -276,13 +280,20 @@ class FleetRuntime:
         worker = AgentWorker(agent, self.bus, self.semaphore)
         worker_task = asyncio.create_task(worker.run())
 
-        # Bridge
+        # Bridge (Telegram)
         bridge = TelegramBridge(
             agent, self.semaphore, bus=self.bus, agent_worker=worker
         )
         bot_task = asyncio.create_task(run_bot(bridge))
 
         agent_tasks = [worker_task, bot_task]
+
+        # MAX bridge (опциональный второй транспорт, если задан max_bot_token)
+        max_task = _maybe_start_max_bridge(
+            agent, self.semaphore, self.bus, worker, self
+        )
+        if max_task:
+            agent_tasks.append(max_task)
 
         # Delegation (только для master)
         if agent.is_master:
@@ -434,9 +445,10 @@ class FleetRuntime:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
-        # Отписаться от bus
+        # Отписаться от bus (unsubscribe идемпотентен — max: no-op, если не было)
         self.bus.unsubscribe(f"agent:{name}")
         self.bus.unsubscribe(f"telegram:{name}")
+        self.bus.unsubscribe(f"max:{name}")
 
         # Удалить из orchestrator
         self.orchestrator.agents.pop(name, None)
@@ -445,6 +457,7 @@ class FleetRuntime:
         self.agents.pop(name, None)
         self.workers.pop(name, None)
         self.bridges.pop(name, None)
+        self.max_bridges.pop(name, None)
         self.tasks.pop(name, None)
 
         logger.info(f"Агент '{name}' остановлен (hot-reload)")
@@ -481,6 +494,46 @@ async def run_bot(bridge: TelegramBridge) -> None:
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
+
+
+def _maybe_start_max_bridge(
+    agent: Agent,
+    semaphore: asyncio.Semaphore,
+    bus: FleetBus,
+    worker: AgentWorker,
+    runtime: "FleetRuntime",
+) -> asyncio.Task | None:
+    """Поднять MAX-bridge для агента, если у него настроен max_bot_token.
+
+    Возвращает task запущенного бота или None (если транспорт не настроен или
+    maxapi не установлен). maxapi — опциональная зависимость: при её отсутствии
+    деградируем gracefully (агент остаётся только в Telegram), по аналогии с
+    bubblewrap для sandbox. Подписка на `max:{name}` и регистрация bridge в
+    runtime — здесь же, чтобы обе точки старта (boot + hot-reload) были единообразны.
+    """
+    if not agent.max_bot_token:
+        return None
+    try:
+        from .max_bridge import MaxBridge
+    except ImportError as e:
+        logger.warning(
+            f"MAX-bridge '{agent.name}' пропущен: maxapi не установлен ({e}). "
+            "Установи зависимость (`pip install maxapi`), чтобы включить МАКС."
+        )
+        return None
+    try:
+        max_bridge = MaxBridge(
+            agent, semaphore, bus=bus, agent_worker=worker,
+            fleet_runtime=runtime,
+        )
+    except Exception as e:
+        logger.error(f"MAX-bridge '{agent.name}' не создан: {e}")
+        return None
+    bus.subscribe(f"max:{agent.name}")
+    task = asyncio.create_task(max_bridge.run())
+    runtime.max_bridges[agent.name] = max_bridge
+    logger.info(f"MAX-бот '{agent.name}' запущен")
+    return task
 
 
 def _cleanup_qmd() -> None:
@@ -699,7 +752,7 @@ async def async_main() -> None:
         tasks.append(worker_task)
         logger.info(f"AgentWorker '{agent.name}' запущен")
 
-        # Bridge
+        # Bridge (Telegram)
         bridge = TelegramBridge(
             agent, semaphore, bus=bus, agent_worker=worker,
             fleet_runtime=runtime,
@@ -708,8 +761,16 @@ async def async_main() -> None:
         bot_task = asyncio.create_task(run_bot(bridge))
         tasks.append(bot_task)
 
+        agent_runtime_tasks = [worker_task, bot_task]
+
+        # MAX bridge (опциональный второй транспорт, если задан max_bot_token)
+        max_task = _maybe_start_max_bridge(agent, semaphore, bus, worker, runtime)
+        if max_task:
+            tasks.append(max_task)
+            agent_runtime_tasks.append(max_task)
+
         # Регистрация в runtime (worker + bot tasks)
-        runtime.register_running(agent, worker, bridge, [worker_task, bot_task])
+        runtime.register_running(agent, worker, bridge, agent_runtime_tasks)
         logger.info(f"Бот '{agent.name}' добавлен в очередь запуска")
 
     # ── Delegation Managers (только для master-агентов) ──

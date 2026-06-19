@@ -106,9 +106,10 @@ class AgentWorker:
                     queued_meta = {"event": "queued_followup"}
                     if thread_id:
                         queued_meta["message_thread_id"] = thread_id
+                    transport = msg.metadata.get("transport", "telegram")
                     await self.bus.publish(FleetMessage(
                         source=f"agent:{self.agent.name}",
-                        target=f"telegram:{self.agent.name}",
+                        target=f"{transport}:{self.agent.name}",
                         content="",
                         msg_type=MessageType.SYSTEM,
                         chat_id=msg.chat_id,
@@ -170,11 +171,15 @@ class AgentWorker:
         # Пробросить thread_id через все ответные сообщения
         thread_id = msg.metadata.get("message_thread_id")
         base_meta = {"message_thread_id": thread_id} if thread_id else {}
+        # Транспорт-источник: ответы уходят туда, откуда пришло входящее
+        # (telegram по умолчанию — обратная совместимость; max и др. — по
+        # metadata["transport"], который проставляет соответствующий bridge).
+        transport = msg.metadata.get("transport", "telegram")
 
         # Уведомить bridge что начали обработку
         await self.bus.publish(FleetMessage(
             source=f"agent:{self.agent.name}",
-            target=f"telegram:{self.agent.name}",
+            target=f"{transport}:{self.agent.name}",
             content="",
             msg_type=MessageType.SYSTEM,
             chat_id=chat_id,
@@ -198,7 +203,7 @@ class AgentWorker:
             async def on_tool_use(hint: str):
                 await self.bus.publish(FleetMessage(
                     source=f"agent:{self.agent.name}",
-                    target=f"telegram:{self.agent.name}",
+                    target=f"{transport}:{self.agent.name}",
                     content=hint,
                     msg_type=MessageType.SYSTEM,
                     chat_id=chat_id,
@@ -211,7 +216,7 @@ class AgentWorker:
                 partial_text = accumulated_text
                 await self.bus.publish(FleetMessage(
                     source=f"agent:{self.agent.name}",
-                    target=f"telegram:{self.agent.name}",
+                    target=f"{transport}:{self.agent.name}",
                     content=accumulated_text,
                     msg_type=MessageType.SYSTEM,
                     chat_id=chat_id,
@@ -240,7 +245,7 @@ class AgentWorker:
             # Очистка outbox происходит в telegram_bridge ПОСЛЕ отправки файлов
             await self.bus.publish(FleetMessage(
                 source=f"agent:{self.agent.name}",
-                target=f"telegram:{self.agent.name}",
+                target=f"{transport}:{self.agent.name}",
                 content=response,
                 msg_type=MessageType.OUTBOUND,
                 chat_id=chat_id,
@@ -267,7 +272,7 @@ class AgentWorker:
                 )
                 await self.bus.publish(FleetMessage(
                     source=f"agent:{self.agent.name}",
-                    target=f"telegram:{self.agent.name}",
+                    target=f"{transport}:{self.agent.name}",
                     content=(
                         f"{partial_text}\n\n"
                         f"⏱ Ответ обрезан по таймауту. "
@@ -285,7 +290,7 @@ class AgentWorker:
             else:
                 await self.bus.publish(FleetMessage(
                     source=f"agent:{self.agent.name}",
-                    target=f"telegram:{self.agent.name}",
+                    target=f"{transport}:{self.agent.name}",
                     content="Ответ занял слишком долго. Попробуй переформулировать.",
                     msg_type=MessageType.OUTBOUND,
                     chat_id=chat_id,
@@ -301,7 +306,7 @@ class AgentWorker:
                 )
                 await self.bus.publish(FleetMessage(
                     source=f"agent:{self.agent.name}",
-                    target=f"telegram:{self.agent.name}",
+                    target=f"{transport}:{self.agent.name}",
                     content=(
                         f"{partial_text}\n\n"
                         f"⚠️ Ответ прервался ошибкой ({type(e).__name__}). "
@@ -320,7 +325,7 @@ class AgentWorker:
             else:
                 await self.bus.publish(FleetMessage(
                     source=f"agent:{self.agent.name}",
-                    target=f"telegram:{self.agent.name}",
+                    target=f"{transport}:{self.agent.name}",
                     content="Произошла ошибка. Попробуй ещё раз.",
                     msg_type=MessageType.OUTBOUND,
                     chat_id=chat_id,
@@ -351,7 +356,7 @@ class AgentWorker:
                     try:
                         await self.bus.publish(FleetMessage(
                             source=f"agent:{self.agent.name}",
-                            target=f"telegram:{self.agent.name}",
+                            target=f"{transport}:{self.agent.name}",
                             content=(
                                 f"⚠️ Не учёл {len(followups)} сообщени"
                                 f"{'е' if len(followups) == 1 else 'я'}, "
@@ -386,6 +391,8 @@ class AgentWorker:
 
     async def _handle_delegation(self, msg: FleetMessage) -> None:
         """Обработать делегированное сообщение от другого агента."""
+        # Транспорт-источник для уведомлений пользователю (telegram по умолч.)
+        transport = msg.metadata.get("transport", "telegram")
         reply_to = msg.metadata.get("reply_to")
         source_agent = msg.metadata.get("source_agent", msg.source)
         source_role = msg.metadata.get("source_role", "")
@@ -456,7 +463,7 @@ class AgentWorker:
             preview = task_preview[:300] + "..." if len(task_preview) > 300 else task_preview
             await self.bus.publish(FleetMessage(
                 source=f"agent:{self.agent.name}",
-                target=f"telegram:{self.agent.name}",
+                target=f"{transport}:{self.agent.name}",
                 content=f"📋 Взял задачу от {source_agent}:\n\n{preview}",
                 msg_type=MessageType.OUTBOUND,
                 chat_id=notify_chat_id,
@@ -482,7 +489,7 @@ class AgentWorker:
         if notify_chat_id:
             await self.bus.publish(FleetMessage(
                 source=f"agent:{self.agent.name}",
-                target=f"telegram:{self.agent.name}",
+                target=f"{transport}:{self.agent.name}",
                 content=response,
                 msg_type=MessageType.OUTBOUND,
                 chat_id=notify_chat_id,
