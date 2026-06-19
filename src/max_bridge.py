@@ -135,8 +135,12 @@ class MaxBridge:
 
     @staticmethod
     async def _close_bot(bot) -> None:
-        """Закрыть сессию бота при остановке (API закрытия в SDK может отличаться)."""
-        for closer in ("session.close", "close"):
+        """Закрыть сессию бота при остановке.
+
+        В maxapi 1.2.0 метод — `close_session`; держим запасные имена на случай
+        смены API в будущих версиях SDK.
+        """
+        for closer in ("close_session", "session.close", "close"):
             target = _dig(bot, closer)
             if callable(target):
                 try:
