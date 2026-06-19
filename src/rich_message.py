@@ -42,6 +42,34 @@ def has_markdown_table(text: str) -> bool:
     return len(rows) >= 2
 
 
+# Заголовок markdown: строка начинается с # или ##
+_HEADING_RE = re.compile(r"^#{1,2} \S", re.MULTILINE)
+
+# Горизонтальный разделитель: строка содержит только --- (с возможными пробелами)
+_HR_RE = re.compile(r"^---+\s*$", re.MULTILINE)
+
+# Минимальная длина текста для rich-рендеринга
+_RICH_MIN_LEN = 200
+
+
+def has_rich_content(text: str) -> bool:
+    """Проверить, стоит ли отправлять текст через sendRichMessage.
+
+    Возвращает True если текст длиннее 200 символов И содержит хотя бы один
+    из признаков rich-форматирования:
+      - markdown-таблицу (| ... |)
+      - заголовок (# или ##)
+      - горизонтальный разделитель (--- на отдельной строке)
+    """
+    if len(text) <= _RICH_MIN_LEN:
+        return False
+    return (
+        has_markdown_table(text)
+        or bool(_HEADING_RE.search(text))
+        or bool(_HR_RE.search(text))
+    )
+
+
 # ── Public API ──────────────────────────────────────────────────────────────
 
 async def send_rich_message(
@@ -86,3 +114,18 @@ async def send_rich_message(
     except Exception as e:
         logger.warning(f"sendRichMessage failed → fallback на HTML: {e}")
         return False
+
+
+async def send_rich_message_draft(
+    bot,
+    chat_id: int,
+    text: str,
+    draft_id: str | None = None,
+    message_thread_id: int | None = None,
+) -> str | None:
+    """TODO: Bot API 10.1 sendRichMessageDraft — streaming rich messages.
+
+    Когда документация будет доступна — реализовать потоковую отправку.
+    Возвращает draft_id для последующих обновлений.
+    """
+    pass

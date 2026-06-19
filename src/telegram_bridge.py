@@ -50,7 +50,7 @@ from .formatter import (
     split_message,
 )
 from .i18n import t
-from .rich_message import has_markdown_table, send_rich_message
+from .rich_message import has_markdown_table, has_rich_content, send_rich_message
 from .telegram_retry import tg_retry
 from .status_message import (
     EDIT_MIN_INTERVAL,
@@ -180,12 +180,12 @@ async def send_long_message(
     Если auto_format=True, сначала разбивает raw markdown (не ломая блоки кода),
     затем форматирует каждую часть в HTML отдельно.
 
-    Если текст содержит markdown-таблицы, сначала пробует sendRichMessage (Bot API 10.1)
-    с fallback на HTML.
+    Если текст содержит rich-контент (таблицы, заголовки, разделители), сначала пробует
+    sendRichMessage (Bot API 10.1) с fallback на HTML.
     """
     if auto_format and parse_mode is None:
-        # Rich Message path: если есть таблица — пробуем Bot API 10.1
-        if has_markdown_table(text):
+        # Rich Message path: если есть rich-контент — пробуем Bot API 10.1
+        if has_rich_content(text):
             success = await send_rich_message(
                 context.bot, chat_id, text, message_thread_id
             )

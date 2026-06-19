@@ -9,7 +9,7 @@ import time
 from telegram.constants import ChatAction
 
 from .formatter import TG_MESSAGE_LIMIT, format_for_telegram
-from .rich_message import has_markdown_table, send_rich_message
+from .rich_message import has_markdown_table, has_rich_content, send_rich_message
 from .telegram_retry import tg_retry
 
 logger = logging.getLogger(__name__)
@@ -87,8 +87,8 @@ class StatusMessage:
         if not self.message_id:
             return False
 
-        # Rich Message path: если есть таблица — пробуем Bot API 10.1 sendRichMessage
-        if has_markdown_table(text):
+        # Rich Message path: если есть rich-контент — пробуем Bot API 10.1 sendRichMessage
+        if has_rich_content(text):
             await self.cleanup()  # Удаляем статус-сообщение
             success = await send_rich_message(
                 self.context.bot, self.chat_id, text, self.thread_id
