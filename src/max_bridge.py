@@ -295,6 +295,18 @@ class MaxBridge:
         except asyncio.CancelledError:
             logger.info(f"MAX-бот '{self.agent.name}' останавливается...")
             raise
+        except Exception as exc:
+            # Любой сбой МАКС-транспорта (битый/отозванный токен, недоступность
+            # API) НЕ должен ронять весь процесс — Telegram-путь обязан выжить.
+            # Деградируем gracefully, по аналогии с отсутствием maxapi/bwrap.
+            # InvalidToken («Неверный токен!») — самый частый случай: токен
+            # протух или отозван; ретраить бессмысленно, просто гасим мост.
+            env_key = f"{self.agent.name.upper()}_MAX_BOT_TOKEN"
+            logger.error(
+                f"MAX-бот '{self.agent.name}' остановлен из-за ошибки транспорта: "
+                f"{type(exc).__name__}: {exc}. Агент остаётся в Telegram. "
+                f"Проверь токен в {env_key} (.env) или max_bot_token в agent.yaml."
+            )
         finally:
             self._running = False
             listener_task.cancel()

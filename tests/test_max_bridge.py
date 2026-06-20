@@ -757,3 +757,50 @@ class TestLiveStreaming:
             await bridge._dispatch_outbound(msg)
             bridge._stop_typing(555)
         assert 555 not in bridge._status_messages
+
+
+class TestRunGracefulDegrade:
+    """Сбой транспорта МАКС (битый/отозванный токен) НЕ должен ронять процесс.
+
+    Регресс на crash-loop: `InvalidToken` из `dp.start_polling()` улетал через
+    `asyncio.gather` в async_main и валил весь флот вместе с Telegram. Теперь
+    `run()` глотает любой не-Cancel сбой polling'а и деградирует gracefully.
+    """
+
+    def _install_fake_maxapi(self, monkeypatch, *, start_polling_exc):
+        """Подсунуть фейковый maxapi в sys.modules, чтобы ленивый импорт в run() прошёл."""
+        import sys
+
+        maxapi_mod = SimpleNamespace()
+        maxapi_mod.Bot = MagicMock(return_value=MagicMock())
+
+        fake_dp = MagicMock()
+        fake_dp.message_created = lambda: (lambda fn: fn)  # декоратор-проходник
+        fake_dp.start_polling = AsyncMock(side_effect=start_polling_exc)
+        maxapi_mod.Dispatcher = MagicMock(return_value=fake_dp)
+
+        types_mod = SimpleNamespace(MessageCreated=object)
+        monkeypatch.setitem(sys.modules, "maxapi", maxapi_mod)
+        monkeypatch.setitem(sys.modules, "maxapi.types", types_mod)
+        return fake_dp
+
+    @pytest.mark.asyncio
+    async def test_invalid_token_does_not_propagate(self, bridge, monkeypatch):
+        # start_polling бросает «InvalidToken» — run() не должен пробрасывать наружу.
+        class InvalidToken(Exception):
+            pass
+
+        self._install_fake_maxapi(monkeypatch, start_polling_exc=InvalidToken("Неверный токен!"))
+        # не падает — это и есть graceful degrade
+        await bridge.run()
+        assert bridge._running is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_still_propagates(self, bridge, monkeypatch):
+        # Штатная остановка (CancelledError) обязана прокидываться дальше.
+        self._install_fake_maxapi(
+            monkeypatch, start_polling_exc=asyncio.CancelledError()
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await bridge.run()
+        assert bridge._running is False
