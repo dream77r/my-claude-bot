@@ -33,6 +33,7 @@ import time
 from . import memory
 from .bus import FleetBus, FleetMessage, MessageType
 from .file_handler import clear_outbox
+from .voice_handler import get_deepgram_api_key, transcribe
 
 # maxapi — ОПЦИОНАЛЬНАЯ зависимость: все её импорты под guard, чтобы модуль
 # грузился и без SDK (в тестах). Enum действий отправителя (TYPING_ON /
@@ -367,12 +368,29 @@ class MaxBridge:
             )
             return
 
-        if not text or not str(text).strip():
-            logger.info(
-                f"MaxBridge '{self.agent.name}': пустой текст — пропуск "
-                "(не-текстовое сообщение?)"
+        # Вложения (голосовые, фото) — обрабатываем даже при пустом тексте.
+        raw_attachments = _dig(
+            event,
+            "message.body.attachments",
+            "message.attachments",
+            "attachments",
+        ) or []
+        if not isinstance(raw_attachments, (list, tuple)):
+            raw_attachments = [raw_attachments]
+
+        files: list[str] = []
+        if raw_attachments:
+            text, files = await self._process_attachments(
+                raw_attachments, chat_id, str(text) if text else ""
             )
-            return  # v1: обрабатываем только текст
+
+        if not text or not str(text).strip():
+            if not files:
+                logger.info(
+                    f"MaxBridge '{self.agent.name}': пустое сообщение без вложений — пропуск"
+                )
+                return
+            text = ""
         text = str(text)
         logger.info(
             f"MaxBridge '{self.agent.name}': входящее от user={user_id_raw} "
@@ -403,19 +421,252 @@ class MaxBridge:
 
         # Лог входящего в память (как делает Telegram-мост на early-persist).
         try:
-            memory.log_message(self.agent.agent_dir, "user", text)
+            memory.log_message(
+                self.agent.agent_dir, "user",
+                text or "[вложение]",
+                files or None,
+            )
         except Exception as exc:
             logger.error(f"MaxBridge log_message(user) error: {exc}")
 
         await self.bus.publish(FleetMessage(
             source=f"max:{chat_id}",
             target=f"agent:{self.agent.name}",
-            content=text,
+            content=text or "[вложение]",
             msg_type=MessageType.INBOUND,
             chat_id=chat_id,
             user_id=user_id or 0,
+            files=files,
             metadata={"transport": "max"},
         ))
+
+    # ── Helpers: вложения и файлы ──
+
+    def _get_master_agent_dir(self) -> str | None:
+        """Получить agent_dir master-агента (для каскадного поиска Deepgram key)."""
+        if not self.fleet_runtime:
+            return None
+        for agent in self.fleet_runtime.agents.values():
+            if agent.is_master:
+                return agent.agent_dir
+        return None
+
+    async def _download_max_file(self, url: str, ext: str = ".dat") -> str | None:
+        """Скачать файл из МАКС по прямому URL, вернуть путь к локальному файлу.
+
+        Сохраняем в memory/raw/voice/ рядом с голосовыми из Telegram — агент
+        обрабатывает всё из одного места независимо от транспорта.
+
+        ВАЖНО: media-URL МАКС (i.oneme.ru и др.) требуют заголовок
+        Authorization: <токен> — без него сервер вернёт 401/403 и файл
+        тихо дропнется. Поэтому используем self._bot.download_file() из SDK:
+        он работает через авторизованную aiohttp-сессию. Fallback на httpx
+        с ручным токеном — только если бот ещё не запущен (self._bot is None).
+        """
+        from datetime import datetime
+        from pathlib import Path
+
+        dest_dir = Path(self.agent.agent_dir) / "memory" / "raw" / "voice"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"max_{timestamp}{ext}"
+
+        try:
+            if self._bot is not None:
+                # Авторизованная загрузка через SDK (aiohttp-сессия с токеном).
+                local_path = await self._bot.download_file(
+                    url, dest_dir, filename=filename
+                )
+            else:
+                # Fallback: бот ещё не запущен — httpx с токеном вручную.
+                import httpx
+                local_path = dest_dir / filename
+                async with httpx.AsyncClient(
+                    headers={"Authorization": self.agent.max_bot_token}
+                ) as client:
+                    resp = await client.get(url, timeout=30)
+                    resp.raise_for_status()
+                    local_path.write_bytes(resp.content)
+            logger.info(
+                f"MaxBridge '{self.agent.name}': скачан файл {Path(str(local_path)).name}"
+            )
+            return str(local_path)
+        except Exception as exc:
+            logger.error(
+                f"MaxBridge '{self.agent.name}': ошибка скачивания "
+                f"{url!r}: {exc}"
+            )
+            return None
+
+    async def _process_attachments(
+        self,
+        attachments: list,
+        chat_id: int,
+        text: str,
+    ) -> tuple[str, list[str]]:
+        """Обработать вложения МАКС: голосовые → транскрипция, фото → файлы.
+
+        Возвращает (обновлённый текст, список путей к скачанным файлам).
+        Голосовые транскрибируются через Deepgram и добавляются к тексту.
+        Фото скачиваются и передаются в FleetMessage.files агенту.
+        Прочие типы (видео, стикеры) логируются и пропускаются.
+        """
+        files: list[str] = []
+        voice_parts: list[str] = []
+        master_dir = self._get_master_agent_dir()
+
+        for att in attachments:
+            att_type = str(_dig(att, "type") or "").lower()
+
+            # ── Голосовое / аудио ──
+            if att_type in ("audio_msg", "audio", "voice"):
+                url = _dig(att, "payload.url", "payload.audio_url")
+                if not url:
+                    logger.warning(
+                        f"MaxBridge '{self.agent.name}': голосовое без URL "
+                        f"(type={att_type!r})"
+                    )
+                    continue
+
+                if not get_deepgram_api_key(self.agent.agent_dir, master_dir):
+                    try:
+                        if self._bot:
+                            await self._bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    "Голосовые сообщения пока не настроены.\n"
+                                    "Отправь мне ключ Deepgram API — и я включу "
+                                    "распознавание голоса.\n"
+                                    "Получить ключ: https://console.deepgram.com/"
+                                ),
+                            )
+                    except Exception as _e:
+                        logger.debug(f"MaxBridge: не смог отправить hint про Deepgram: {_e}")
+                    continue
+
+                # Определить расширение по URL, fallback — .ogg
+                import os as _os
+                raw_ext = _os.path.splitext(str(url).split("?")[0])[1].lower()
+                audio_ext = raw_ext if raw_ext in {".ogg", ".oga", ".opus", ".mp3",
+                                                    ".m4a", ".aac", ".wav"} else ".ogg"
+                audio_path = await self._download_max_file(url, ext=audio_ext)
+                if not audio_path:
+                    voice_parts.append("[голосовое сообщение — не удалось скачать]")
+                    continue
+
+                try:
+                    transcript = await transcribe(
+                        audio_path,
+                        agent_dir=self.agent.agent_dir,
+                        master_agent_dir=master_dir,
+                    )
+                    voice_parts.append(f"[голосовое сообщение]: {transcript}")
+                except Exception as exc:
+                    logger.error(f"MaxBridge '{self.agent.name}' transcribe error: {exc}")
+                    voice_parts.append("[голосовое сообщение — не удалось распознать]")
+
+            # ── Фото / изображение ──
+            elif att_type == "image":
+                # МАКС отдаёт список photos разных размеров; берём наибольший (последний).
+                url = None
+                payload = getattr(att, "payload", None)
+                if payload is not None:
+                    photos = getattr(payload, "photos", None)
+                    if photos and isinstance(photos, (list, tuple)) and photos:
+                        url = getattr(photos[-1], "url", None)
+                    if not url:
+                        url = getattr(payload, "url", None)
+                if not url:
+                    url = _dig(att, "payload.url")
+
+                if not url:
+                    logger.warning(f"MaxBridge '{self.agent.name}': фото без URL")
+                    continue
+
+                photo_path = await self._download_max_file(url, ext=".jpg")
+                if photo_path:
+                    files.append(photo_path)
+                else:
+                    logger.warning(f"MaxBridge '{self.agent.name}': не удалось скачать фото")
+
+            # ── Видео ──
+            elif att_type == "video":
+                url = None
+                payload = getattr(att, "payload", None)
+                if payload is not None:
+                    # Некоторые версии SDK отдают список videos (как photos для картинок)
+                    videos = getattr(payload, "videos", None)
+                    if videos and isinstance(videos, (list, tuple)) and videos:
+                        url = getattr(videos[-1], "url", None)
+                    if not url:
+                        url = getattr(payload, "url", None)
+                if not url:
+                    url = _dig(att, "payload.url", "payload.video_url")
+
+                if not url:
+                    logger.warning(f"MaxBridge '{self.agent.name}': видео без URL")
+                    continue
+
+                import os as _os
+                raw_ext = _os.path.splitext(str(url).split("?")[0])[1].lower()
+                video_ext = raw_ext if raw_ext in {
+                    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".3gp", ".flv"
+                } else ".mp4"
+                video_path = await self._download_max_file(url, ext=video_ext)
+                if video_path:
+                    files.append(video_path)
+                    logger.info(
+                        f"MaxBridge '{self.agent.name}': видео скачано → {video_ext}"
+                    )
+                else:
+                    logger.warning(f"MaxBridge '{self.agent.name}': не удалось скачать видео")
+
+            # ── Файл / документ / любой другой тип с URL ──
+            else:
+                # Пробуем достать URL из стандартных полей payload.
+                # Стикеры, гифки, прочие типы — если есть URL, скачиваем и
+                # передаём агенту как файл. Без URL — логируем и пропускаем.
+                import os as _os
+                url = _dig(
+                    att,
+                    "payload.url",
+                    "payload.file_url",
+                    "payload.link",
+                    "payload.sticker_url",
+                )
+                if not url:
+                    logger.info(
+                        f"MaxBridge '{self.agent.name}': вложение '{att_type}' "
+                        "без URL — пропуск"
+                    )
+                    continue
+
+                # Расширение берём из имени файла (если есть) или из URL
+                filename = str(_dig(att, "payload.filename", "payload.name") or "")
+                ext_src = filename or str(url).split("?")[0]
+                raw_ext = _os.path.splitext(ext_src)[1].lower()
+                file_ext = raw_ext if raw_ext else ".dat"
+
+                file_path = await self._download_max_file(url, ext=file_ext)
+                if file_path:
+                    files.append(file_path)
+                    logger.info(
+                        f"MaxBridge '{self.agent.name}': вложение '{att_type}' "
+                        f"скачано → {_os.path.basename(file_path)}"
+                    )
+                else:
+                    logger.warning(
+                        f"MaxBridge '{self.agent.name}': не удалось скачать "
+                        f"вложение (type={att_type!r})"
+                    )
+
+        # Собрать финальный текст: исходный + транскрипции
+        if voice_parts:
+            parts = [text] if text.strip() else []
+            parts.extend(voice_parts)
+            text = "\n".join(parts)
+
+        return text, files
 
     # ── Outbound: bus (max:{name}) → МАКС ──
 
