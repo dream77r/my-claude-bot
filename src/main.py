@@ -491,9 +491,22 @@ async def run_bot(bridge: TelegramBridge) -> None:
         if bus_listener_task:
             bus_listener_task.cancel()
     finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        # Каждый шаг shutdown — под своим try/except. Если updater не успел
+        # стартовать (падение на app.start()/start_polling), app.updater.stop()
+        # кидает RuntimeError("This Updater is not running!"), который раньше
+        # затирал исходную ошибку И ронял остальные шаги (утечка app.stop/
+        # shutdown). Теперь каждый шаг изолирован — graceful degrade.
+        for _close, _label in (
+            (app.updater.stop, "updater.stop"),
+            (app.stop, "stop"),
+            (app.shutdown, "shutdown"),
+        ):
+            try:
+                await _close()
+            except Exception as _e:
+                logger.debug(
+                    f"Бот '{bridge.agent.name}' {_label} на shutdown: {_e}"
+                )
 
 
 def _maybe_start_max_bridge(
@@ -1003,7 +1016,19 @@ async def async_main() -> None:
     )
 
     try:
-        await asyncio.gather(*tasks)
+        # return_exceptions=True — изоляция флота: падение ОДНОЙ таски (бот,
+        # MAX-мост, фоновый цикл) больше НЕ роняет весь процесс. Раньше любой
+        # неперехваченный эксепшен в одной таске пробрасывался сюда и убивал
+        # всех (см. инцидент 2026-06-20: битый токен МАКС → весь парк в
+        # restart-loop). Упавшие таски логируем, чтобы сбой не утонул молча.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException) and not isinstance(
+                r, asyncio.CancelledError
+            ):
+                logger.error(
+                    f"Таска флота завершилась с ошибкой: {type(r).__name__}: {r}"
+                )
     except asyncio.CancelledError:
         orchestrator.stop()
     finally:

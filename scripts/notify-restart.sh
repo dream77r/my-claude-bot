@@ -16,6 +16,23 @@ if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
     exit 0  # Нет настроек — молча выходим
 fi
 
+# ── Анти-спам ──
+# systemd: Restart=always + RestartSec=5. При краш-петле ExecStartPost дёргается
+# на КАЖДЫЙ рестарт (раньше → сотни «✅ Бот запущен» в чат). Шлём уведомление
+# только если с прошлого прошло >5 минут: легитимный рестарт уведомит один раз,
+# цикл падений (рестарт каждые 5с) — молчит.
+SENTINEL="/tmp/my-claude-bot-last-notify"
+NOW=$(date +%s)
+if [ -f "$SENTINEL" ]; then
+    LAST=$(cat "$SENTINEL" 2>/dev/null || echo 0)
+    case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
+    if [ $(( NOW - LAST )) -lt 300 ]; then
+        echo "$NOW" > "$SENTINEL"
+        exit 0
+    fi
+fi
+echo "$NOW" > "$SENTINEL"
+
 # Собрать информацию
 UPTIME=$(uptime -p 2>/dev/null || echo "N/A")
 MEMORY=$(free -h | awk '/^Mem:/{print $3 "/" $2}')
