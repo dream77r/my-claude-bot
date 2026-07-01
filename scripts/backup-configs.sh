@@ -33,6 +33,7 @@ mapfile -t ITEMS < <(
        \( -name 'agent.yaml' -o -name 'agent.local.yaml' -o -name 'SOUL.md' \
           -o -name 'HEARTBEAT.md' -o -name 'settings.json' \) 2>/dev/null
   find agents -maxdepth 2 -type d -name skills 2>/dev/null
+  find agents -maxdepth 2 -type d -name templates 2>/dev/null
 )
 
 if [ "${#ITEMS[@]}" -eq 0 ]; then
