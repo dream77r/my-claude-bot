@@ -112,6 +112,18 @@ CURRENT_DATE=$(git log -1 --format="%ai" | cut -d' ' -f1)
 echo -e "  Current version: ${CYAN}${CURRENT_COMMIT}${RESET} (${CURRENT_DATE})"
 
 # ══════════════════════════════════════════
+# Бэкап конфигов агентов (ДО любых изменений)
+# ══════════════════════════════════════════
+# agent.yaml/SOUL.md/skills — user data вне git. Снимаем перед pull/reset/
+# миграциями, чтобы их нельзя было потерять при clean/reset. Не смертельно:
+# сбой бэкапа не должен ронять апдейт (иначе set -e оборвёт скрипт).
+if [ -x scripts/backup-configs.sh ]; then
+    echo ""
+    echo -e "${BOLD}Backing up agent configs...${RESET}"
+    scripts/backup-configs.sh || echo -e "${YELLOW}  ⚠ config backup failed (continuing)${RESET}"
+fi
+
+# ══════════════════════════════════════════
 # Проверка локальных изменений в src/
 # ══════════════════════════════════════════
 
@@ -354,6 +366,19 @@ if [ "$STASHED" -eq 1 ]; then
         echo -e "${YELLOW}  ⚠ Merge conflict — your changes saved in git stash${RESET}"
         echo "  Resolve manually: git stash show -p | git apply"
     fi
+fi
+
+# ══════════════════════════════════════════
+# Восстановление пропавших конфигов агентов (само-исцеление)
+# ══════════════════════════════════════════
+# Если git clean/reset/незапопленный stash стёр agent.yaml/SOUL/skills —
+# доливаем их из последнего бэкапа. Только ОТСУТСТВУЮЩИЕ, existing не трогаем,
+# так что это безопасно гонять при каждом апдейте. Агент без agent.yaml иначе
+# молча не грузится — этот шаг закрывает главную причину «боты пропали».
+if [ -x scripts/restore-configs.sh ]; then
+    echo ""
+    echo -e "${BOLD}Restoring any missing agent configs...${RESET}"
+    scripts/restore-configs.sh || echo -e "${YELLOW}  ⚠ config restore skipped${RESET}"
 fi
 
 # ══════════════════════════════════════════
