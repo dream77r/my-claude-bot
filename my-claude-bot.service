@@ -25,8 +25,11 @@ MemoryHigh=800M
 CPUQuota=200%
 TasksMax=100
 
-# Optional: notification on (re)start
-# ExecStartPost=%h/my-claude-bot/scripts/notify-restart.sh
+# Optional: notification on (re)start.
+# Дефис перед путём (ExecStartPost=-...) обязателен: он говорит systemd
+# игнорировать код возврата скрипта. Иначе сбой уведомлялки = сбой всего
+# сервиса → Restart=always загоняет бота в краш-петлю.
+# ExecStartPost=-%h/my-claude-bot/scripts/notify-restart.sh
 
 [Install]
 WantedBy=default.target

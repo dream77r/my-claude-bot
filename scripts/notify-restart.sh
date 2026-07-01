@@ -21,17 +21,22 @@ fi
 # на КАЖДЫЙ рестарт (раньше → сотни «✅ Бот запущен» в чат). Шлём уведомление
 # только если с прошлого прошло >5 минут: легитимный рестарт уведомит один раз,
 # цикл падений (рестарт каждые 5с) — молчит.
-SENTINEL="/tmp/my-claude-bot-last-notify"
+#
+# Путь ПЕР-ЮЗЕРНЫЙ ($(id -u)): на хосте может стоять несколько клонов под разными
+# юзерами. Общий путь в /tmp (sticky + fs.protected_regular) → чужой юзер физически
+# не может перезаписать файл-владельца, echo падает с "Permission denied", а с set -e
+# это роняет ExecStartPost и через Restart=always загоняет бота в вечную краш-петлю.
+SENTINEL="/tmp/my-claude-bot-last-notify-$(id -u)"
 NOW=$(date +%s)
 if [ -f "$SENTINEL" ]; then
     LAST=$(cat "$SENTINEL" 2>/dev/null || echo 0)
     case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
     if [ $(( NOW - LAST )) -lt 300 ]; then
-        echo "$NOW" > "$SENTINEL"
+        echo "$NOW" > "$SENTINEL" 2>/dev/null || true
         exit 0
     fi
 fi
-echo "$NOW" > "$SENTINEL"
+echo "$NOW" > "$SENTINEL" 2>/dev/null || true
 
 # Собрать информацию
 UPTIME=$(uptime -p 2>/dev/null || echo "N/A")
