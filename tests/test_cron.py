@@ -6,7 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from src.cron import CronJob, _execute_job, load_cron_jobs, parse_cron_field, should_run
+from src.cron import (
+    CronJob,
+    _execute_job,
+    load_cron_jobs,
+    parse_cron_field,
+    parse_dom_field,
+    resolve_last_day_token,
+    should_run,
+)
 from src.bus import FleetBus, FleetMessage, MessageType
 
 
@@ -476,3 +484,170 @@ class TestFounderChatIdFallback:
 
         from src.main import _founder_chat_id
         assert _founder_chat_id(tmp_path) == 123456789
+
+
+class TestLastDayOfMonth:
+    """`L` / `L-N` в поле дня месяца — для правил инвентаризации."""
+
+    def test_resolve_token(self):
+        # Февраль 2026 — 28 дней, февраль 2028 — високосный, 29
+        assert resolve_last_day_token("L", datetime(2026, 2, 10)) == 28
+        assert resolve_last_day_token("L-1", datetime(2026, 2, 10)) == 27
+        assert resolve_last_day_token("L", datetime(2028, 2, 1)) == 29
+        assert resolve_last_day_token("L", datetime(2026, 1, 1)) == 31
+
+    def test_resolve_token_non_l(self):
+        assert resolve_last_day_token("15", datetime(2026, 1, 1)) is None
+        assert resolve_last_day_token("*", datetime(2026, 1, 1)) is None
+        assert resolve_last_day_token("*/2", datetime(2026, 1, 1)) is None
+
+    def test_last_day_31_day_month(self):
+        assert should_run("0 10 L * *", datetime(2026, 1, 31, 10, 0)) is True
+        assert should_run("0 10 L * *", datetime(2026, 1, 30, 10, 0)) is False
+
+    def test_last_day_30_day_month(self):
+        assert should_run("0 10 L * *", datetime(2026, 4, 30, 10, 0)) is True
+        assert should_run("0 10 L * *", datetime(2026, 4, 29, 10, 0)) is False
+
+    def test_last_day_february_common_and_leap(self):
+        # 2026 — не високосный: последний день 28 февраля
+        assert should_run("0 10 L * *", datetime(2026, 2, 28, 10, 0)) is True
+        # 2028 — високосный: 28 февраля уже НЕ последний
+        assert should_run("0 10 L * *", datetime(2028, 2, 28, 10, 0)) is False
+        assert should_run("0 10 L * *", datetime(2028, 2, 29, 10, 0)) is True
+
+    def test_day_before_last_day(self):
+        assert should_run("0 16 L-1 * *", datetime(2026, 2, 27, 16, 0)) is True
+        assert should_run("0 16 L-1 * *", datetime(2026, 2, 28, 16, 0)) is False
+        assert should_run("0 16 L-1 * *", datetime(2026, 1, 30, 16, 0)) is True
+
+    def test_hour_still_filters(self):
+        assert should_run("0 10 L * *", datetime(2026, 1, 31, 16, 0)) is False
+
+    def test_lowercase_l(self):
+        assert should_run("0 10 l * *", datetime(2026, 1, 31, 10, 0)) is True
+
+    def test_list_of_l_tokens(self):
+        # "накануне последнего И последний" одним выражением
+        assert parse_dom_field("L,L-1", datetime(2026, 1, 31)) is True
+        assert parse_dom_field("L,L-1", datetime(2026, 1, 30)) is True
+        assert parse_dom_field("L,L-1", datetime(2026, 1, 29)) is False
+
+    def test_mixed_list_with_plain_day(self):
+        assert parse_dom_field("1,L", datetime(2026, 1, 1)) is True
+        assert parse_dom_field("1,L", datetime(2026, 1, 31)) is True
+        assert parse_dom_field("1,L", datetime(2026, 1, 15)) is False
+
+    def test_offset_beyond_month_never_fires(self):
+        # L-40 уходит за начало месяца — не наступает никогда
+        for day in (1, 15, 28):
+            assert parse_dom_field("L-40", datetime(2026, 2, day)) is False
+
+    def test_plain_fields_unchanged(self):
+        # Регресс: поля без L работают ровно как раньше
+        assert parse_dom_field("15", datetime(2026, 1, 15)) is True
+        assert parse_dom_field("15", datetime(2026, 1, 16)) is False
+        assert parse_dom_field("*", datetime(2026, 1, 16)) is True
+        assert parse_dom_field("*/10", datetime(2026, 1, 20)) is True
+
+    def test_garbage_field_does_not_raise(self):
+        # Раньше ValueError из int() улетал в вызывающий cron-цикл
+        assert should_run("0 9 abc * *", datetime(2026, 1, 15, 9, 0)) is False
+        assert should_run("zz 9 * * *", datetime(2026, 1, 15, 9, 0)) is False
+
+
+class TestCronJobTargetChat:
+    """Явный chat_id/thread_id у задачи — отчёт в группу, а не в личку."""
+
+    def _config(self, **overrides):
+        item = {
+            "name": "inventory",
+            "schedule": "0 10 L * *",
+            "prompt": "Напомни про инвентаризацию",
+        }
+        item.update(overrides)
+        return {"cron": [item]}
+
+    def test_defaults_to_none(self):
+        job = load_cron_jobs(self._config())[0]
+        assert job.chat_id is None
+        assert job.thread_id is None
+
+    def test_parsed_from_config(self):
+        job = load_cron_jobs(
+            self._config(chat_id=-1003804830025, thread_id=42)
+        )[0]
+        assert job.chat_id == -1003804830025
+        assert job.thread_id == 42
+
+    def test_string_chat_id_coerced(self):
+        # YAML легко отдаёт строку, если значение в кавычках
+        job = load_cron_jobs(self._config(chat_id="-1003804830025"))[0]
+        assert job.chat_id == -1003804830025
+
+    def test_garbage_chat_id_ignored(self):
+        job = load_cron_jobs(self._config(chat_id="не число"))[0]
+        assert job.chat_id is None
+
+    @pytest.mark.asyncio
+    async def test_job_chat_id_overrides_agent_chat(self):
+        """chat_id задачи перекрывает дефолтный чат агента."""
+        import sys
+
+        helper = TestExecuteJobNotificationRouting()
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+
+        job = CronJob(
+            name="inventory",
+            schedule="0 10 L * *",
+            prompt="Напомни",
+            model="haiku",
+            notify=True,
+            chat_id=-1003804830025,
+            thread_id=7,
+        )
+        mock_sdk, mock_memory = helper._make_sdk_modules("Инвентаризация!")
+        with patch.dict(
+            sys.modules,
+            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        ):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="me",
+                bus=bus,
+                chat_id=12345,  # личка владельца — должна быть перекрыта
+            )
+
+        msg = bus._queues["telegram:me"].get_nowait()
+        assert msg.chat_id == -1003804830025
+        assert msg.metadata["message_thread_id"] == 7
+        assert "Инвентаризация!" in msg.content
+
+    @pytest.mark.asyncio
+    async def test_without_job_chat_id_falls_back_to_agent_chat(self):
+        """Регресс: без chat_id у задачи поведение прежнее."""
+        import sys
+
+        helper = TestExecuteJobNotificationRouting()
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+
+        job = helper._make_job()
+        mock_sdk, mock_memory = helper._make_sdk_modules("Дайджест")
+        with patch.dict(
+            sys.modules,
+            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        ):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="me",
+                bus=bus,
+                chat_id=12345,
+            )
+
+        msg = bus._queues["telegram:me"].get_nowait()
+        assert msg.chat_id == 12345
+        assert msg.metadata.get("message_thread_id") is None

@@ -222,3 +222,77 @@ class TestSmartHeartbeatLogDaily:
         hb = SmartHeartbeat("/tmp/agent", "test", {"triggers": []})
         # Не должен выбросить исключение
         hb._log_to_daily("test", "result")
+
+
+class TestSmartTriggerTargetChat:
+    """Явный chat_id/thread_id у триггера — отчёт в группу, а не в личку."""
+
+    def _config(self, **overrides):
+        config = {
+            "name": "inventory",
+            "schedule": "0 10 L * *",
+            "prompt": "Напомни про инвентаризацию",
+        }
+        config.update(overrides)
+        return config
+
+    def test_defaults_to_none(self):
+        trigger = SmartTrigger(self._config())
+        assert trigger.chat_id is None
+        assert trigger.thread_id is None
+
+    def test_parsed_from_config(self):
+        trigger = SmartTrigger(
+            self._config(chat_id=-1003804830025, thread_id=42)
+        )
+        assert trigger.chat_id == -1003804830025
+        assert trigger.thread_id == 42
+
+    def test_string_chat_id_coerced(self):
+        trigger = SmartTrigger(self._config(chat_id="-1003804830025"))
+        assert trigger.chat_id == -1003804830025
+
+    def test_garbage_chat_id_ignored(self):
+        trigger = SmartTrigger(self._config(chat_id="не число"))
+        assert trigger.chat_id is None
+
+    def test_last_day_schedule(self):
+        trigger = SmartTrigger(self._config())
+        assert trigger.should_run(datetime(2026, 1, 31, 10, 0)) is True
+        assert trigger.should_run(datetime(2026, 1, 30, 10, 0)) is False
+
+    @pytest.mark.asyncio
+    async def test_notification_goes_to_trigger_chat(self):
+        """chat_id триггера перекрывает дефолтный чат агента."""
+        bus = MagicMock()
+        bus.publish = AsyncMock()
+        hb = SmartHeartbeat(
+            "/tmp/agent", "me", {"triggers": []}, bus=bus, chat_id=12345
+        )
+        trigger = SmartTrigger(
+            self._config(chat_id=-1003804830025, thread_id=7)
+        )
+
+        await hb._send_notification(trigger, "Инвентаризация!")
+
+        msg = bus.publish.call_args[0][0]
+        assert msg.chat_id == -1003804830025
+        assert msg.metadata["message_thread_id"] == 7
+        assert "Инвентаризация!" in msg.content
+
+    @pytest.mark.asyncio
+    async def test_notification_falls_back_to_agent_chat(self):
+        """Регресс: без chat_id у триггера уведомление идёт в чат агента."""
+        bus = MagicMock()
+        bus.publish = AsyncMock()
+        hb = SmartHeartbeat(
+            "/tmp/agent", "me", {"triggers": []}, bus=bus, chat_id=12345
+        )
+        trigger = SmartTrigger(self._config())
+
+        await hb._send_notification(trigger, "Отчёт")
+
+        msg = bus.publish.call_args[0][0]
+        assert msg.chat_id == 12345
+        assert msg.metadata.get("message_thread_id") is None
+        assert msg.target == "telegram:me"

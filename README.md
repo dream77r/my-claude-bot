@@ -240,9 +240,28 @@ cron:
     prompt: "Create a weekly summary: key decisions, progress, blockers"
     model: "sonnet"
     notify: true
+  - name: "inventory_last_day"
+    schedule: "0 10 L * *"          # last day of the month at 10:00
+    prompt: "Remind the team about inventory"
+    model: "haiku"
+    notify: true
+    chat_id: -1001234567890         # deliver to a group, not the owner's DM
+    thread_id: 42                   # optional: a specific forum topic
 ```
 
 Supported cron expressions: `*`, `*/N`, `N-M`, `N,M,K`, exact values. Format: `minutes hours day month weekday`.
+
+**Last day of the month.** The day field also accepts `L` (last day) and `L-N` (N days before the last one). The month length is resolved at runtime, so one rule stays correct across 28/29/30/31-day months:
+
+| Expression | Fires |
+|---|---|
+| `0 10 L * *` | last day of the month, 10:00 |
+| `0 16 L-1 * *` | the day before the last one, 16:00 |
+| `0 9 L,L-1 * *` | both of those days, 9:00 |
+
+**Delivery target.** By default the result goes to the agent's default chat (the owner's DM). `chat_id` and `thread_id` override that address, so a job can post into a group or a specific forum topic. The same two fields work on `heartbeat.triggers`.
+
+The schedule lives in `agent.yaml` — an on-disk, git-tracked file — so jobs survive a bot restart and a `git pull`.
 
 ## Requirements
 

@@ -17,11 +17,24 @@ cron:
     prompt: "Сделай резюме дня..."
     model: "haiku"
     notify: true
+  - name: "inventory_last_day"
+    schedule: "0 10 L * *"       # Последний день месяца, 10:00
+    prompt: "Напомни про инвентаризацию..."
+    model: "haiku"
+    notify: true
+    chat_id: -1001234567890      # Отчёт уходит в группу, а не в личку
+    thread_id: 42                # Опционально: конкретный топик группы
 ```
+
+День месяца поддерживает `L` (последний день месяца) и `L-N` (за N дней
+до последнего): `L-1` — накануне последнего дня. Число дней в месяце
+вычисляется на лету, поэтому правило одинаково корректно для 28/29/30/31.
 """
 
 import asyncio
+import calendar
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -42,6 +55,10 @@ class CronJob:
     model: str = "sonnet"
     notify: bool = True
     allowed_tools: list[str] | None = None
+    # Куда слать результат. None → дефолтный чат агента (личка владельца).
+    # Явное значение перекрывает его: группа, канал, конкретный топик.
+    chat_id: int | None = None
+    thread_id: int | None = None
 
 
 def parse_cron_field(field: str, current: int, max_val: int) -> bool:
@@ -72,6 +89,48 @@ def parse_cron_field(field: str, current: int, max_val: int) -> bool:
     return current == int(field)
 
 
+# `L` (последний день месяца) и `L-N` (за N дней до последнего).
+_LAST_DAY_RE = re.compile(r"^L(?:-(\d+))?$", re.IGNORECASE)
+
+
+def resolve_last_day_token(token: str, now: datetime) -> int | None:
+    """Развернуть `L` / `L-N` в номер дня месяца для даты `now`.
+
+    `L` — последний день месяца, `L-1` — накануне последнего.
+    Возвращает None, если токен не в L-формате (обычное число/диапазон).
+    """
+    match = _LAST_DAY_RE.match(token.strip())
+    if match is None:
+        return None
+    offset = int(match.group(1) or 0)
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    return last_day - offset
+
+
+def parse_dom_field(field: str, now: datetime) -> bool:
+    """Поле day-of-month с поддержкой `L` / `L-N`.
+
+    Без `L` поведение полностью совпадает с parse_cron_field.
+    L-токены смешиваются со списком: "1,15,L", "L,L-1".
+    """
+    field = field.strip()
+    if "l" not in field.lower():
+        return parse_cron_field(field, now.day, 31)
+
+    for token in field.split(","):
+        day = resolve_last_day_token(token, now)
+        if day is None:
+            # Обычный токен в списке рядом с L — например "1,L"
+            if parse_cron_field(token.strip(), now.day, 31):
+                return True
+            continue
+        # L-N может уйти за начало месяца (L-40) — такой день не наступает
+        if day >= 1 and now.day == day:
+            return True
+
+    return False
+
+
 def should_run(schedule: str, now: datetime | None = None) -> bool:
     """
     Проверить должна ли задача запуститься в текущую минуту.
@@ -90,14 +149,33 @@ def should_run(schedule: str, now: datetime | None = None) -> bool:
 
     minute, hour, day, month, weekday = parts
 
-    return (
-        parse_cron_field(minute, now.minute, 59)
-        and parse_cron_field(hour, now.hour, 23)
-        and parse_cron_field(day, now.day, 31)
-        and parse_cron_field(month, now.month, 12)
-        and parse_cron_field(weekday, now.isoweekday() % 7, 6)
-        # isoweekday: Mon=1..Sun=7, cron: Sun=0..Sat=6
-    )
+    try:
+        return (
+            parse_cron_field(minute, now.minute, 59)
+            and parse_cron_field(hour, now.hour, 23)
+            and parse_dom_field(day, now)
+            and parse_cron_field(month, now.month, 12)
+            and parse_cron_field(weekday, now.isoweekday() % 7, 6)
+            # isoweekday: Mon=1..Sun=7, cron: Sun=0..Sat=6
+        )
+    except ValueError as e:
+        # Нечисловой мусор в поле ("0 9 abc * *"). Раньше ValueError
+        # вылетал в вызывающий цикл и ронял проверку остальных задач.
+        logger.warning(f"Невалидный cron: '{schedule}' ({e})")
+        return False
+
+
+def _optional_int(value: object, job_name: str, field: str) -> int | None:
+    """Привести опциональное поле к int. Мусор → None + warning."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"Cron '{job_name}': поле {field}={value!r} не int, игнорирую"
+        )
+        return None
 
 
 def load_cron_jobs(config: dict) -> list[CronJob]:
@@ -112,6 +190,10 @@ def load_cron_jobs(config: dict) -> list[CronJob]:
                 model=item.get("model", "sonnet"),
                 notify=item.get("notify", True),
                 allowed_tools=item.get("allowed_tools"),
+                chat_id=_optional_int(item.get("chat_id"), item["name"], "chat_id"),
+                thread_id=_optional_int(
+                    item.get("thread_id"), item["name"], "thread_id"
+                ),
             )
             jobs.append(job)
         except KeyError as e:
@@ -182,17 +264,24 @@ async def _execute_job(
         # Worker-агенты не имеют прямого чата с пользователем (chat_id=0).
         # Маршрутизируем через мастер-агента, если notify_agent_name задан.
         target_agent = notify_agent_name or agent_name
-        if chat_id == 0:
+        # Явный chat_id задачи перекрывает дефолтный чат агента — так
+        # отчёт уходит в конкретную группу, а не в личку владельца.
+        target_chat_id = job.chat_id if job.chat_id is not None else chat_id
+        if target_chat_id == 0:
             logger.warning(
                 f"Cron '{job.name}': chat_id=0, уведомление не будет доставлено. "
-                f"Установите FOUNDER_TELEGRAM_ID в .env"
+                f"Укажите chat_id у задачи или FOUNDER_TELEGRAM_ID в .env"
             )
+        metadata = {}
+        if job.thread_id is not None:
+            metadata["message_thread_id"] = job.thread_id
         notification = FleetMessage(
             source=f"agent:{agent_name}",
             target=f"telegram:{target_agent}",
             content=f"[{job.name}]\n\n{result_text}",
             msg_type=MessageType.OUTBOUND,
-            chat_id=chat_id,
+            chat_id=target_chat_id,
+            metadata=metadata,
         )
         await bus.publish(notification)
 

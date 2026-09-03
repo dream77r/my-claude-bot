@@ -20,7 +20,17 @@ heartbeat:
       prompt: "Проверь дедлайны..."
       model: "haiku"
       notify: "auto"
+    - name: "inventory_last_day"
+      schedule: "0 10 L * *"       # Последний день месяца, 10:00
+      prompt: "Напомни про инвентаризацию..."
+      model: "haiku"
+      notify: true
+      chat_id: -1001234567890      # В группу, а не в личку владельца
+      thread_id: 42                # Опционально: топик группы
 ```
+
+Расписание — тот же парсер, что и у cron (`src/cron.py`), включая
+`L` / `L-N` в дне месяца: `L` — последний день месяца, `L-1` — накануне.
 """
 
 import asyncio
@@ -45,6 +55,20 @@ from .heartbeat import check_heartbeat
 logger = logging.getLogger(__name__)
 
 
+def _optional_int(value: object, trigger_name: str, field: str) -> int | None:
+    """Привести опциональное поле к int. Мусор → None + warning."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"SmartTrigger '{trigger_name}': поле {field}={value!r} не int, "
+            f"игнорирую"
+        )
+        return None
+
+
 class SmartTrigger:
     """Один умный триггер."""
 
@@ -56,6 +80,14 @@ class SmartTrigger:
         self.notify: bool | str = config.get("notify", "auto")  # true/false/"auto"
         self.allowed_tools: list[str] = config.get(
             "allowed_tools", ["Read", "Write", "Glob", "Grep"]
+        )
+        # Куда слать результат. None → дефолтный чат агента.
+        # Явное значение перекрывает его: группа, канал, конкретный топик.
+        self.chat_id: int | None = _optional_int(
+            config.get("chat_id"), self.name, "chat_id"
+        )
+        self.thread_id: int | None = _optional_int(
+            config.get("thread_id"), self.name, "thread_id"
         )
 
     def should_run(self, now: datetime) -> bool:
@@ -200,7 +232,7 @@ class SmartHeartbeat:
 
             # 5. Отправить уведомление
             if should_notify and self.bus:
-                await self._send_notification(trigger.name, response)
+                await self._send_notification(trigger, response)
 
         except Exception as e:
             logger.error(f"SmartTrigger '{trigger.name}' error: {e}")
@@ -259,22 +291,36 @@ class SmartHeartbeat:
             logger.error(f"Notification evaluation error: {e}")
             return False
 
-    async def _send_notification(self, trigger_name: str, text: str) -> None:
-        """Отправить уведомление через bus."""
+    async def _send_notification(
+        self, trigger: SmartTrigger, text: str
+    ) -> None:
+        """Отправить уведомление через bus.
+
+        Явный `chat_id` триггера перекрывает дефолтный чат агента — так
+        отчёт уходит в конкретную группу, а не в личку владельца.
+        """
         if not self.bus:
             return
+
+        target_chat_id = (
+            trigger.chat_id if trigger.chat_id is not None else self.chat_id
+        )
+        metadata = {}
+        if trigger.thread_id is not None:
+            metadata["message_thread_id"] = trigger.thread_id
 
         msg = FleetMessage(
             source=f"agent:{self.agent_name}",
             target=f"telegram:{self.agent_name}",
-            content=f"[{trigger_name}]\n\n{text}",
+            content=f"[{trigger.name}]\n\n{text}",
             msg_type=MessageType.OUTBOUND,
-            chat_id=self.chat_id,
+            chat_id=target_chat_id,
+            metadata=metadata,
         )
         await self.bus.publish(msg)
         logger.info(
-            f"SmartTrigger '{trigger_name}': уведомление отправлено "
-            f"в чат {self.chat_id}"
+            f"SmartTrigger '{trigger.name}': уведомление отправлено "
+            f"в чат {target_chat_id}"
         )
 
     # Sentinel-ответы триггеров, которые не несут содержания и не должны
