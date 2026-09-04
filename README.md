@@ -261,6 +261,8 @@ Supported cron expressions: `*`, `*/N`, `N-M`, `N,M,K`, exact values. Format: `m
 
 **Delivery target.** By default the result goes to the agent's default chat (the owner's DM). `chat_id` and `thread_id` override that address, so a job can post into a group or a specific forum topic. The same two fields work on `heartbeat.triggers`.
 
+**Which bot sends it.** Without `chat_id`, a worker agent (which has no DM with the owner) delivers through the master agent's bot. With an explicit `chat_id` it delivers through the agent's own bot: that is the bot actually added to the group, while the master's bot usually is not a member there and the send would fail silently with `chat not found`. So the agent's own bot must be a member of the group you point at.
+
 The schedule lives in `agent.yaml` — an on-disk, git-tracked file — so jobs survive a bot restart and a `git pull`.
 
 ## Requirements

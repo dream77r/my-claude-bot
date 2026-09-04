@@ -217,6 +217,8 @@ async def _execute_job(
             иначе — в telegram:{agent_name}. Используется для worker-агентов,
             у которых нет прямого chat_id с пользователем: уведомление
             доставляется через telegram-бота мастер-агента.
+            Исключение — задача с явным chat_id: она всегда уходит через
+            собственного бота агента (см. ниже).
     """
     from claude_agent_sdk import (
         AssistantMessage,
@@ -261,12 +263,21 @@ async def _execute_job(
 
     # Уведомить если нужно
     if job.notify and bus and result_text:
-        # Worker-агенты не имеют прямого чата с пользователем (chat_id=0).
-        # Маршрутизируем через мастер-агента, если notify_agent_name задан.
-        target_agent = notify_agent_name or agent_name
         # Явный chat_id задачи перекрывает дефолтный чат агента — так
         # отчёт уходит в конкретную группу, а не в личку владельца.
         target_chat_id = job.chat_id if job.chat_id is not None else chat_id
+        # Каким ботом слать.
+        #  • Без chat_id у задачи: worker-агенты не имеют прямого чата с
+        #    пользователем (chat_id=0), поэтому уведомление уходит через
+        #    бота мастера — только у него есть личка с владельцем.
+        #  • С явным chat_id: слать надо СВОИМ ботом. В группу/канал
+        #    добавляют бота самого агента, а мастер-бот там обычно не
+        #    состоит — Telegram ответит "chat not found", и напоминание
+        #    молча потеряется. Своего бота и адресует конфиг задачи.
+        if job.chat_id is not None:
+            target_agent = agent_name
+        else:
+            target_agent = notify_agent_name or agent_name
         if target_chat_id == 0:
             logger.warning(
                 f"Cron '{job.name}': chat_id=0, уведомление не будет доставлено. "
@@ -284,6 +295,10 @@ async def _execute_job(
             metadata=metadata,
         )
         await bus.publish(notification)
+        logger.info(
+            f"Cron '{job.name}': уведомление → чат {target_chat_id} "
+            f"через бота '{target_agent}'"
+        )
 
 
 async def cron_loop(
@@ -306,6 +321,7 @@ async def cron_loop(
         notify_agent_name: имя агента для маршрутизации уведомлений.
             Для worker-агентов задайте имя мастер-агента, чтобы уведомления
             отправлялись через его telegram-бота (у worker chat_id=0).
+            На задачи с явным chat_id не влияет — те идут своим ботом.
     """
     jobs = load_cron_jobs(config)
     if not jobs:

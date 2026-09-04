@@ -651,3 +651,116 @@ class TestCronJobTargetChat:
         msg = bus._queues["telegram:me"].get_nowait()
         assert msg.chat_id == 12345
         assert msg.metadata.get("message_thread_id") is None
+
+
+class TestWorkerCronBotRouting:
+    """Каким ботом worker-агент шлёт cron-уведомление.
+
+    Worker не имеет лички с владельцем → по умолчанию уведомление уходит
+    через бота мастера. Но задача с явным chat_id адресует группу, в
+    которой состоит бот САМОГО агента; мастер-бота там нет, и отправка
+    через него падает с "chat not found". Поэтому явный chat_id
+    переключает отправку на собственного бота агента.
+    """
+
+    def _job(self, **overrides) -> CronJob:
+        kwargs = {
+            "name": "inventory_tue",
+            "schedule": "3 9 * * 2",
+            "prompt": "Напомни про инвентаризацию",
+            "model": "haiku",
+            "notify": True,
+        }
+        kwargs.update(overrides)
+        return CronJob(**kwargs)
+
+    @pytest.mark.asyncio
+    async def test_explicit_chat_id_routes_via_own_bot(self):
+        """Задача с chat_id → telegram:{worker}, а не telegram:{master}."""
+        import sys
+
+        helper = TestExecuteJobNotificationRouting()
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+        bus.subscribe("telegram:gooose")
+
+        job = self._job(chat_id=-1003804830025, thread_id=11)
+        mock_sdk, mock_memory = helper._make_sdk_modules("Пора считать остатки")
+        with patch.dict(
+            sys.modules,
+            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        ):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="gooose",
+                bus=bus,
+                chat_id=99999,           # FOUNDER_TELEGRAM_ID
+                notify_agent_name="me",  # дефолт для worker'а
+            )
+
+        # Мастер-бот не участвует: его нет в группе
+        assert bus._queues["telegram:me"].empty()
+        msg = bus._queues["telegram:gooose"].get_nowait()
+        assert msg.target == "telegram:gooose"
+        assert msg.chat_id == -1003804830025
+        assert msg.metadata["message_thread_id"] == 11
+        assert msg.source == "agent:gooose"
+
+    @pytest.mark.asyncio
+    async def test_without_chat_id_still_routes_via_master(self):
+        """Регресс: без chat_id worker по-прежнему идёт через мастера."""
+        import sys
+
+        helper = TestExecuteJobNotificationRouting()
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+        bus.subscribe("telegram:gooose")
+
+        job = self._job()
+        mock_sdk, mock_memory = helper._make_sdk_modules("Отчёт")
+        with patch.dict(
+            sys.modules,
+            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        ):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="gooose",
+                bus=bus,
+                chat_id=99999,
+                notify_agent_name="me",
+            )
+
+        assert bus._queues["telegram:gooose"].empty()
+        msg = bus._queues["telegram:me"].get_nowait()
+        assert msg.target == "telegram:me"
+        assert msg.chat_id == 99999
+
+    @pytest.mark.asyncio
+    async def test_master_with_explicit_chat_id_unchanged(self):
+        """Мастер с явным chat_id — как и был, через собственного бота."""
+        import sys
+
+        helper = TestExecuteJobNotificationRouting()
+        bus = FleetBus()
+        bus.subscribe("telegram:me")
+
+        job = self._job(chat_id=-1003804830025)
+        mock_sdk, mock_memory = helper._make_sdk_modules("Отчёт мастера")
+        with patch.dict(
+            sys.modules,
+            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        ):
+            await _execute_job(
+                job=job,
+                agent_dir="/tmp/test",
+                agent_name="me",
+                bus=bus,
+                chat_id=12345,
+                notify_agent_name=None,
+            )
+
+        msg = bus._queues["telegram:me"].get_nowait()
+        assert msg.target == "telegram:me"
+        assert msg.chat_id == -1003804830025
