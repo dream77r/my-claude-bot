@@ -650,29 +650,34 @@ def build_smart_context(
     return "\n".join(parts)
 
 
-def save_session_id(agent_dir: str, session_id: str) -> None:
-    """Сохранить ID сессии Claude CLI для --resume."""
+def _session_file(agent_dir: str, backend: str) -> Path:
     memory = get_memory_path(agent_dir)
-    session_dir = memory / "sessions"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    session_file = session_dir / "current_session_id"
+    # claude хранит в legacy-имени (обратная совместимость с существующими
+    # memory/); остальные бэкенды — в своём неймспейсе, чтобы переключение
+    # туда-обратно не портило чужие сессии.
+    fname = "current_session_id" if backend == "claude" else f"{backend}_session_id"
+    return memory / "sessions" / fname
+
+
+def save_session_id(agent_dir: str, session_id: str, backend: str = "claude") -> None:
+    """Сохранить ID сессии CLI для resume (неймспейс — по бэкенду)."""
+    session_file = _session_file(agent_dir, backend)
+    session_file.parent.mkdir(parents=True, exist_ok=True)
     session_file.write_text(session_id, encoding="utf-8")
 
 
-def get_session_id(agent_dir: str) -> str | None:
-    """Прочитать ID текущей сессии. None если нет."""
-    memory = get_memory_path(agent_dir)
-    session_file = memory / "sessions" / "current_session_id"
+def get_session_id(agent_dir: str, backend: str = "claude") -> str | None:
+    """Прочитать ID текущей сессии бэкенда. None если нет."""
+    session_file = _session_file(agent_dir, backend)
     if session_file.exists():
         sid = session_file.read_text(encoding="utf-8").strip()
         return sid if sid else None
     return None
 
 
-def clear_session_id(agent_dir: str) -> None:
+def clear_session_id(agent_dir: str, backend: str = "claude") -> None:
     """Удалить текущую сессию (для /newsession)."""
-    memory = get_memory_path(agent_dir)
-    session_file = memory / "sessions" / "current_session_id"
+    session_file = _session_file(agent_dir, backend)
     if session_file.exists():
         session_file.unlink()
 

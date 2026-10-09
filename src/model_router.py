@@ -20,15 +20,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
-
-from . import get_claude_cli_path
+from . import llm
 
 logger = logging.getLogger(__name__)
 
@@ -67,17 +59,9 @@ async def classify(
     if not user_message or not user_message.strip():
         return "COMPLEX"
 
-    options = ClaudeAgentOptions(
-        model=router_model,
-        permission_mode="bypassPermissions",
-        cli_path=get_claude_cli_path(),
-        system_prompt=CLASSIFIER_SYSTEM,
-        max_turns=1,
-    )
-
     try:
         result = await asyncio.wait_for(
-            _run_classifier(user_message, options),
+            _run_classifier(user_message, router_model),
             timeout=CLASSIFIER_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
@@ -93,14 +77,10 @@ async def classify(
     return "COMPLEX"
 
 
-async def _run_classifier(prompt: str, options: ClaudeAgentOptions) -> str:
-    text = ""
-    async for msg in query(prompt=prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    text += block.text
-        elif isinstance(msg, ResultMessage):
-            if msg.result and not text:
-                text = msg.result
-    return text
+async def _run_classifier(prompt: str, model: str) -> str:
+    """Один вызов классификатора через LLM-слой (активный бэкенд)."""
+    return await llm.complete(
+        prompt=prompt,
+        model=model,
+        system_prompt=CLASSIFIER_SYSTEM,
+    )

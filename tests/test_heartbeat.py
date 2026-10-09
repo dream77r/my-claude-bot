@@ -30,9 +30,7 @@ class TestHeartbeatFile:
         # Функция вернёт has_tasks=False без вызова Claude
         import asyncio
         from src.heartbeat import check_heartbeat
-        result = asyncio.get_event_loop().run_until_complete(
-            check_heartbeat(agent_dir)
-        )
+        result = asyncio.run(check_heartbeat(agent_dir))
         assert result["has_tasks"] is False
 
     def test_heartbeat_file_exists(self, agent_dir):

@@ -22,15 +22,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
-
-from . import get_claude_cli_path, memory
+from . import llm, memory
 
 logger = logging.getLogger(__name__)
 
@@ -476,28 +468,13 @@ async def _call_claude_agent(
     cwd: str | None = None,
     allowed_tools: list[str] | None = None,
 ) -> str:
-    """LLM-вызов Claude. С tools — агентный режим, без — простой."""
-    options = ClaudeAgentOptions(
+    """LLM-вызов на активном бэкенде. С tools — агентный режим, без — простой."""
+    return await llm.complete(
+        prompt=prompt,
         model=model,
-        permission_mode="bypassPermissions",
-        cli_path=get_claude_cli_path(),
+        cwd=cwd,
+        allowed_tools=allowed_tools,
     )
-    if cwd:
-        options.cwd = cwd
-    if allowed_tools:
-        options.allowed_tools = allowed_tools
-
-    result_text = ""
-    async for msg in query(prompt=prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    result_text += block.text
-        elif isinstance(msg, ResultMessage):
-            if msg.result and not result_text:
-                result_text = msg.result
-
-    return result_text
 
 
 async def _call_claude_simple(

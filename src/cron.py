@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from . import get_claude_cli_path
+from . import llm
 from .bus import FleetBus, FleetMessage, MessageType
 from .task_utils import spawn_supervised
 
@@ -220,38 +220,20 @@ async def _execute_job(
             Исключение — задача с явным chat_id: она всегда уходит через
             собственного бота агента (см. ниже).
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
     from . import memory
 
     logger.info(f"Cron '{job.name}' запущен для '{agent_name}'")
 
     memory_path = memory.get_memory_path(agent_dir)
 
-    options = ClaudeAgentOptions(
-        model=job.model,
-        permission_mode="bypassPermissions",
-        cli_path=get_claude_cli_path(),
-        cwd=str(memory_path),
-    )
-    if job.allowed_tools:
-        options.allowed_tools = job.allowed_tools
-
     result_text = ""
     try:
-        async for msg in query(prompt=job.prompt, options=options):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        result_text += block.text
-            elif isinstance(msg, ResultMessage):
-                if msg.result and not result_text:
-                    result_text = msg.result
+        result_text = await llm.complete(
+            prompt=job.prompt,
+            model=job.model,
+            cwd=str(memory_path),
+            allowed_tools=job.allowed_tools,
+        )
     except Exception as e:
         logger.error(f"Cron '{job.name}' error: {e}")
         return

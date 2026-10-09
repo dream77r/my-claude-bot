@@ -42,6 +42,11 @@ skills: []
 allowed_users:
 {allowed_users_yaml}max_context_messages: 50
 claude_model: "{model}"
+# LLM-бэкенд: null = следовать глобальному выбору (/backend, config/backend.yaml).
+# Иначе id из реестра: claude / codex / kimi / mimo.
+backend: {backend}
+# Модель не-Claude бэкенда: null = дефолт платформы.
+backend_model: null
 claude_flags:
   - "--allowedTools"
   - "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch"
@@ -134,6 +139,7 @@ class AgentManager:
         bot_token: str,
         description: str,
         model: str = "sonnet",
+        backend: str | None = None,
         soul_md: str | None = None,
         allowed_users: list[int] | None = None,
         soul_template: str | None = None,
@@ -147,6 +153,8 @@ class AgentManager:
             bot_token: токен от @BotFather
             description: описание роли (одно предложение)
             model: модель Claude (haiku/sonnet/opus)
+            backend: LLM-бэкенд из реестра (claude/codex/kimi/mimo);
+                None — следовать глобальному выбору
             soul_md: кастомный SOUL.md (если None — используется шаблон)
             allowed_users: список Telegram user ID (если None — только FOUNDER)
             soul_template: имя шаблона из templates/souls/<name>.md (например
@@ -161,7 +169,7 @@ class AgentManager:
             FileExistsError: если агент с таким именем уже существует
         """
         # Валидация
-        errors = self._validate_create_params(name, bot_token, model)
+        errors = self._validate_create_params(name, bot_token, model, backend)
         if errors:
             raise ValueError("; ".join(errors))
 
@@ -199,6 +207,7 @@ class AgentManager:
             display_name=display_name,
             description=description,
             model=model,
+            backend=f'"{backend}"' if backend else "null",
             env_var=env_var,
             allowed_users_yaml=allowed_users_yaml,
         )
@@ -246,7 +255,8 @@ class AgentManager:
         """
         Клонировать существующего агента: SOUL.md, скиллы, настройки.
 
-        Копирует: SOUL.md, skills/, claude_model, claude_flags, dream, heartbeat.
+        Копирует: SOUL.md, skills/, claude_model, claude_flags, backend,
+        backend_model, dream, heartbeat.
         НЕ копирует: memory/, bot_token, sessions.
 
         Returns:
@@ -310,6 +320,8 @@ class AgentManager:
         # Собрать новый agent.yaml на основе источника
         env_var = f"{new_name.upper().replace('-', '_')}_BOT_TOKEN"
         model = source_config.get("claude_model", "sonnet")
+        backend = source_config.get("backend")
+        backend_model = source_config.get("backend_model")
         flags = source_config.get("claude_flags", [])
         dream = source_config.get("dream", {})
         heartbeat = source_config.get("heartbeat", {})
@@ -352,6 +364,10 @@ class AgentManager:
             f'max_context_messages: {source_config.get("max_context_messages", 50)}',
             f'claude_model: "{model}"',
         ])
+        if backend:
+            yaml_lines.append(f'backend: "{backend}"')
+        if backend_model:
+            yaml_lines.append(f'backend_model: "{backend_model}"')
         if flags:
             yaml_lines.append("claude_flags:")
             for flag in flags:
@@ -463,10 +479,29 @@ class AgentManager:
                 f"Имя '{name}' невалидно (только латиница, цифры, -, _)"
             )
 
-        # Валидация модели
+        # Валидация бэкенда и модели
+        backend = config.get("backend")
+        spec = None
+        if backend:
+            from . import llm
+            if backend not in llm.registry.BACKENDS:
+                errors.append(
+                    f"Неизвестный бэкенд: {backend}. "
+                    f"Доступны: {', '.join(llm.registry.BACKENDS)}"
+                )
+            else:
+                spec = llm.registry.BACKENDS[backend]
+
+        # Модель: мягкая проверка по списку бэкенда. CLI-бэкенды принимают
+        # произвольные id моделей, поэтому незнакомая модель — warning,
+        # а не ошибка.
         model = config.get("claude_model", "sonnet")
-        if model not in ("haiku", "sonnet", "opus"):
-            errors.append(f"Неизвестная модель: {model}")
+        if model and spec and spec.models and model not in spec.models:
+            logger.warning(
+                f"Модель '{model}' не входит в список бэкенда '{backend}' "
+                f"({', '.join(spec.models)}). CLI-бэкенды обычно принимают "
+                f"произвольные id моделей — это предупреждение, не ошибка."
+            )
 
         # SOUL.md существует
         if not soul_path.exists():
@@ -491,7 +526,7 @@ class AgentManager:
         return results
 
     def _validate_create_params(
-        self, name: str, bot_token: str, model: str
+        self, name: str, bot_token: str, model: str, backend: str | None = None
     ) -> list[str]:
         """Валидация параметров для create_agent."""
         errors = []
@@ -512,8 +547,14 @@ class AgentManager:
                 "(получить у @BotFather в Telegram)"
             )
 
-        if model not in ("haiku", "sonnet", "opus"):
-            errors.append(f"Неизвестная модель: {model}. Доступны: haiku, sonnet, opus")
+        # Модель не валидируем жёстко: CLI-бэкенды принимают произвольные id.
+        if backend:
+            from . import llm
+            if backend not in llm.registry.BACKENDS:
+                errors.append(
+                    f"Неизвестный бэкенд: {backend}. Доступны: "
+                    f"{', '.join(llm.registry.BACKENDS)}"
+                )
 
         return errors
 

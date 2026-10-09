@@ -13,16 +13,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
-
 from . import memory
-from . import get_claude_cli_path
+from . import llm
 from .input_sanitizer import sanitize_for_dream
 
 logger = logging.getLogger(__name__)
@@ -141,30 +133,14 @@ async def _call_claude_agent(
     allowed_tools: list[str] | None = None,
     system_prompt: str | None = None,
 ) -> str:
-    """Агентный вызов Claude. С tools — Phase 2, без — Phase 1."""
-    options = ClaudeAgentOptions(
+    """Агентный вызов на активном бэкенде. С tools — Phase 2, без — Phase 1."""
+    return await llm.complete(
+        prompt=prompt,
         model=model,
-        permission_mode="bypassPermissions",
-        cli_path=get_claude_cli_path(),
+        system_prompt=system_prompt,
+        cwd=cwd,
+        allowed_tools=allowed_tools,
     )
-    if cwd:
-        options.cwd = cwd
-    if allowed_tools:
-        options.allowed_tools = allowed_tools
-    if system_prompt:
-        options.system_prompt = system_prompt
-
-    result_text = ""
-    async for msg in query(prompt=prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    result_text += block.text
-        elif isinstance(msg, ResultMessage):
-            if msg.result and not result_text:
-                result_text = msg.result
-
-    return result_text
 
 
 async def _call_claude_simple(

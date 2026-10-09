@@ -2,7 +2,7 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -71,6 +71,27 @@ class StubQuery:
         return gen()
 
 
+def _patch_query(stub):
+    """Патч query для Agent._call_claude_sdk.
+
+    src.agent больше не импортирует query на верхнем уровне — SDK
+    резолвится лениво через src.llm.claude_cli.sdk(), поэтому подменяем
+    его там. Классы сообщений — настоящие, иначе isinstance-проверки
+    в _call_claude_sdk не сработают.
+    """
+    import claude_agent_sdk as real_sdk
+    from src.llm import claude_cli
+
+    fake_sdk = MagicMock()
+    fake_sdk.AssistantMessage = real_sdk.AssistantMessage
+    fake_sdk.ClaudeAgentOptions = real_sdk.ClaudeAgentOptions
+    fake_sdk.ResultMessage = real_sdk.ResultMessage
+    fake_sdk.TextBlock = real_sdk.TextBlock
+    fake_sdk.ToolUseBlock = real_sdk.ToolUseBlock
+    fake_sdk.query = stub
+    return patch.object(claude_cli, "sdk", lambda: fake_sdk)
+
+
 @pytest.mark.asyncio
 async def test_continuation_on_max_tokens(agent):
     """max_tokens → вызов 2 с prompt='Продолжи.', текст склеивается."""
@@ -79,7 +100,7 @@ async def test_continuation_on_max_tokens(agent):
         [_mk_assistant_msg("part 2"), _mk_result_msg("end_turn")],
     ])
 
-    with patch("src.agent.query", stub), \
+    with _patch_query(stub), \
          patch("src.agent.memory.log_message"), \
          patch("src.agent.memory.get_recent_messages", return_value=[]), \
          patch("src.agent.git_committer.commit", new_callable=AsyncMock):
@@ -97,7 +118,7 @@ async def test_no_continuation_on_end_turn(agent):
         _mk_result_msg("end_turn"),
     ]])
 
-    with patch("src.agent.query", stub), \
+    with _patch_query(stub), \
          patch("src.agent.memory.log_message"), \
          patch("src.agent.memory.get_recent_messages", return_value=[]), \
          patch("src.agent.git_committer.commit", new_callable=AsyncMock):
@@ -116,7 +137,7 @@ async def test_continuation_capped(agent):
         for i in range(6)
     ])
 
-    with patch("src.agent.query", stub), \
+    with _patch_query(stub), \
          patch("src.agent.memory.log_message"), \
          patch("src.agent.memory.get_recent_messages", return_value=[]), \
          patch("src.agent.git_committer.commit", new_callable=AsyncMock):

@@ -11,16 +11,8 @@ import asyncio
 import logging
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
-
 from . import memory
-from . import get_claude_cli_path
+from . import llm
 from .bus import FleetBus, FleetMessage, MessageType
 
 logger = logging.getLogger(__name__)
@@ -33,27 +25,12 @@ async def _call_claude(
     allowed_tools: list[str] | None = None,
 ) -> str:
     """Вызов Claude (простой или агентный)."""
-    options = ClaudeAgentOptions(
+    return await llm.complete(
+        prompt=prompt,
         model=model,
-        permission_mode="bypassPermissions",
-        cli_path=get_claude_cli_path(),
+        cwd=cwd,
+        allowed_tools=allowed_tools,
     )
-    if cwd:
-        options.cwd = cwd
-    if allowed_tools:
-        options.allowed_tools = allowed_tools
-
-    result_text = ""
-    async for msg in query(prompt=prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    result_text += block.text
-        elif isinstance(msg, ResultMessage):
-            if msg.result and not result_text:
-                result_text = msg.result
-
-    return result_text
 
 
 async def check_heartbeat(agent_dir: str) -> dict:

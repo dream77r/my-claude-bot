@@ -85,7 +85,7 @@ class FleetCommandsMixin:
         await self._reply(
             update, context,
             "Создание нового агента.\n\n"
-            "Шаг 1/6: Введи имя агента (латиницей, для папки).\n"
+            "Шаг 1/7: Введи имя агента (латиницей, для папки).\n"
             "Пример: researcher, writer, support\n\n"
             "Отправь /cancel чтобы отменить."
         )
@@ -138,7 +138,7 @@ class FleetCommandsMixin:
             await self._reply(
                 update, context,
                 f"Имя: {name}\n\n"
-                "Шаг 2/6: Отображаемое имя (на русском).\n"
+                "Шаг 2/7: Отображаемое имя (на русском).\n"
                 "Пример: Исследователь, Копирайтер, Поддержка"
             )
 
@@ -148,7 +148,7 @@ class FleetCommandsMixin:
             await self._reply(
                 update, context,
                 f"Название: {data['display_name']}\n\n"
-                "Шаг 3/6: Токен бота от @BotFather.\n"
+                "Шаг 3/7: Токен бота от @BotFather.\n"
                 "Создай бота в Telegram через @BotFather и пришли токен."
             )
 
@@ -167,7 +167,7 @@ class FleetCommandsMixin:
             state["step"] = "description"
             await self._reply(
                 update, context,
-                "Шаг 4/6: Описание роли (одно предложение).\n"
+                "Шаг 4/7: Описание роли (одно предложение).\n"
                 "Пример: AI-исследователь, помогает находить и анализировать информацию"
             )
 
@@ -177,7 +177,7 @@ class FleetCommandsMixin:
             await self._reply(
                 update, context,
                 f"Роль: {data['description']}\n\n"
-                "Шаг 5/6: Модель Claude.\n"
+                "Шаг 5/7: Модель Claude.\n"
                 "Варианты: haiku (быстрая), sonnet (баланс), opus (максимум)\n"
                 "Просто напиши название или нажми Enter для sonnet."
             )
@@ -188,11 +188,36 @@ class FleetCommandsMixin:
                 model = "sonnet"
             data["model"] = model
 
-            state["step"] = "users"
+            state["step"] = "backend"
             await self._reply(
                 update, context,
                 f"Модель: {model}\n\n"
-                "Шаг 6/6: Для кого этот агент?\n\n"
+                "Шаг 6/7: Бэкенд LLM.\n"
+                "Варианты: claude / codex / kimi / mimo\n"
+                "Нажми Enter чтобы использовать глобальный бэкенд."
+            )
+
+        elif step == "backend":
+            backend = text.strip().lower()
+            if backend:
+                from .. import llm
+                if backend not in llm.registry.BACKENDS:
+                    await self._reply(
+                        update, context,
+                        f"Неизвестный бэкенд: {backend}.\n"
+                        "Варианты: claude / codex / kimi / mimo\n"
+                        "Попробуй ещё раз (или Enter для глобального):"
+                    )
+                    return
+                data["backend"] = backend
+            else:
+                data["backend"] = None
+
+            state["step"] = "users"
+            await self._reply(
+                update, context,
+                f"Бэкенд: {data['backend'] or 'как глобально'}\n\n"
+                "Шаг 7/7: Для кого этот агент?\n\n"
                 "Варианты:\n"
                 "- Перешли мне сообщение от клиента — я возьму его ID автоматически\n"
                 "- Введи Telegram ID вручную (число)\n"
@@ -242,6 +267,7 @@ class FleetCommandsMixin:
                 f"  Токен: {data['token'][:10]}...\n"
                 f"  Роль: {data['description']}\n"
                 f"  Модель: {data['model']}\n"
+                f"  Бэкенд: {data.get('backend') or 'как глобально'}\n"
                 f"  Доступ: {access_desc}\n\n"
                 "Создать? (да/нет)"
             )
@@ -279,6 +305,7 @@ class FleetCommandsMixin:
                 description=data["description"],
                 model=data["model"],
                 allowed_users=allowed_users,
+                backend=data.get("backend"),
             )
         except (ValueError, FileExistsError) as e:
             await self._reply(update, context, f"Ошибка: {e}")

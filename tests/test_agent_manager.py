@@ -80,3 +80,110 @@ def test_explicit_soul_md_wins_over_template(root):
     soul = (agent_dir / "SOUL.md").read_text(encoding="utf-8")
     assert soul == "# Custom SOUL Override\n"
     assert "Template Team" not in soul
+
+
+def test_template_has_null_backend_by_default(root):
+    """Без backend в yaml пишется backend: null (следовать глобальному выбору)."""
+    import yaml
+
+    mgr = AgentManager(root)
+    agent_dir = mgr.create_agent(
+        name="follower",
+        display_name="Follower",
+        bot_token="5:mno",
+        description="Без своего бэкенда",
+    )
+    config = yaml.safe_load((agent_dir / "agent.yaml").read_text(encoding="utf-8"))
+    assert config["backend"] is None
+    assert config["backend_model"] is None
+
+
+def test_create_agent_with_backend(root):
+    """backend='codex' попадает в yaml как явный id."""
+    import yaml
+
+    mgr = AgentManager(root)
+    agent_dir = mgr.create_agent(
+        name="backender",
+        display_name="Backender",
+        bot_token="6:pqr",
+        description="На codex",
+        backend="codex",
+    )
+    config = yaml.safe_load((agent_dir / "agent.yaml").read_text(encoding="utf-8"))
+    assert config["backend"] == "codex"
+
+
+def test_create_agent_rejects_unknown_backend(root):
+    """Неизвестный бэкенд — ValueError на этапе валидации."""
+    mgr = AgentManager(root)
+    with pytest.raises(ValueError, match="Неизвестный бэкенд"):
+        mgr.create_agent(
+            name="bogus",
+            display_name="Bogus",
+            bot_token="7:stu",
+            description="Сломанный бэкенд",
+            backend="not-a-backend",
+        )
+
+
+def _make_validated_agent(root, name: str, yaml_extra: str) -> Path:
+    """Минимальная структура агента для validate_agent."""
+    agent_dir = root / "agents" / name
+    (agent_dir / "memory").mkdir(parents=True)
+    (agent_dir / "SOUL.md").write_text("# SOUL\n", encoding="utf-8")
+    (agent_dir / "agent.yaml").write_text(
+        f'name: "{name}"\n'
+        f'bot_token: "${{{name.upper()}_BOT_TOKEN}}"\n'
+        f"{yaml_extra}",
+        encoding="utf-8",
+    )
+    return agent_dir
+
+
+def test_validate_agent_unknown_backend_is_error(root):
+    mgr = AgentManager(root)
+    agent_dir = _make_validated_agent(root, "badbackend", "backend: nonexistent\n")
+    ok, errors = mgr.validate_agent(agent_dir)
+    assert not ok
+    assert any("Неизвестный бэкенд" in e for e in errors)
+
+
+def test_validate_agent_unknown_model_is_warning_not_error(root, caplog):
+    """Модель вне списка бэкенда — warning в лог, агент валиден
+    (CLI-бэкенды принимают произвольные id моделей)."""
+    import logging
+
+    mgr = AgentManager(root)
+    agent_dir = _make_validated_agent(
+        root,
+        "freemodel",
+        'backend: codex\nclaude_model: "my-custom-model"\n',
+    )
+    with caplog.at_level(logging.WARNING, logger="src.agent_manager"):
+        ok, errors = mgr.validate_agent(agent_dir)
+    assert ok, errors
+    assert any("my-custom-model" in r.message for r in caplog.records)
+
+
+def test_validate_agent_empty_model_skips_check(root):
+    """Пустая строка модели — без проверки и без warning."""
+    mgr = AgentManager(root)
+    agent_dir = _make_validated_agent(
+        root,
+        "emptymodel",
+        'backend: codex\nclaude_model: ""\n',
+    )
+    ok, errors = mgr.validate_agent(agent_dir)
+    assert ok, errors
+
+
+def test_validate_agent_known_backend_known_model_ok(root):
+    mgr = AgentManager(root)
+    agent_dir = _make_validated_agent(
+        root,
+        "goodagent",
+        'backend: codex\nclaude_model: "gpt-5.1"\n',
+    )
+    ok, errors = mgr.validate_agent(agent_dir)
+    assert ok, errors

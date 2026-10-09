@@ -20,14 +20,6 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    ToolUseBlock,
-    query,
-)
 
 from . import git_committer
 from . import memory
@@ -103,6 +95,9 @@ class Agent:
         self.allowed_users: list[int] = self._parse_allowed_users()
         self.max_context_messages: int = self.config.get("max_context_messages", 50)
         self.claude_model: str = self.config.get("claude_model", "sonnet")
+        # Бэкенд LLM: null = следовать глобальному выбору (config/backend.yaml).
+        self.backend: str | None = self.config.get("backend") or None
+        self.backend_model: str | None = self.config.get("backend_model") or None
         # Роутер (опт-ин): если claude_model_router задан, перед основным
         # вызовом Haiku-классификатор решает SIMPLE vs COMPLEX. SIMPLE →
         # переключаем модель на claude_model_simple, COMPLEX → claude_model.
@@ -1110,6 +1105,174 @@ class Agent:
         user_id: int | None = None,
     ) -> str:
         """
+        Вызвать LLM-бэкенд для одного хода диалога.
+
+        Диспетчер: claude → _call_claude_sdk (claude-agent-sdk, resume, хуки,
+        sandbox); codex/kimi/mimo → _call_cli_backend (headless CLI, реплей
+        истории из conversations.jsonl). Сигнатура прежняя — worker и тесты
+        её не меняют.
+
+        Args:
+            message: текст сообщения от пользователя
+            files: список путей к файлам (будут упомянуты в промпте)
+            semaphore: глобальный семафор для ограничения параллельных вызовов
+            on_tool_use: async callback, вызывается с tool hint строкой
+                         при каждом использовании инструмента
+            on_text_delta: async callback, вызывается при каждом TextBlock
+                           для streaming ответа
+            group_chat_id: ID группового чата (None для DM)
+
+        Returns:
+            Текстовый ответ от модели
+        """
+        from . import llm
+
+        cfg = llm.load()
+        backend_id = self.backend or cfg.backend
+        if backend_id == "claude":
+            return await self._call_claude_sdk(
+                message, files, semaphore, on_tool_use, on_text_delta,
+                group_chat_id, user_id,
+            )
+        return await self._call_cli_backend(
+            backend_id=backend_id,
+            message=message,
+            files=files,
+            semaphore=semaphore,
+            on_tool_use=on_tool_use,
+            on_text_delta=on_text_delta,
+            group_chat_id=group_chat_id,
+            user_id=user_id,
+        )
+
+    async def _call_cli_backend(
+        self,
+        *,
+        backend_id: str,
+        message: str,
+        files: list[str] | None,
+        semaphore: asyncio.Semaphore | None,
+        on_tool_use: Callable[[str], Awaitable[None]] | None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None,
+        group_chat_id: int | None,
+        user_id: int | None,
+    ) -> str:
+        """
+        Ход диалога через headless CLI-бэкенд (codex/kimi/mimo).
+
+        Непрерывность — реплеем нашей истории (llm.history): бот сам логирует
+        всю переписку в raw/conversations/*.jsonl. CLI-native resume — задача
+        на будущее. Деградация против claude-пути: без хуков (command_guard,
+        sandbox.py), без MCP, без allowed_tools-вайтлиста — изоляция только
+        через cwd в memory-директории агента и нативные механизмы CLI.
+        """
+        from . import llm
+        from .llm import history as llm_history
+
+        effective_dir = self.get_effective_dir(user_id)
+
+        spec, model = llm.resolve(
+            agent_backend=backend_id,
+            agent_backend_model=self.backend_model,
+            user_model=memory.get_setting(effective_dir, "backend_model"),
+        )
+        backend = llm.get_backend(spec)
+
+        # Промпт с файлами (как в claude-пути)
+        prompt = message
+        if files:
+            file_list = "\n".join(f"- {f}" for f in files)
+            prompt = f"{message}\n\nПрикреплённые файлы:\n{file_list}"
+
+        # System prompt — изолированный для групп
+        if group_chat_id is not None:
+            system_prompt = self.build_group_system_prompt(group_chat_id)
+        else:
+            system_prompt = self.build_system_prompt(
+                user_query=message, user_dir=effective_dir
+            )
+
+        memory_path = Path(effective_dir) / "memory"
+        memory_path.mkdir(parents=True, exist_ok=True)
+
+        history_text = llm_history.replay(memory_path, current_message=message)
+        if history_text:
+            prompt = (
+                "## История диалога с этим пользователем\n\n"
+                f"{history_text}\n\n---\n\nНовое сообщение:\n\n{prompt}"
+            )
+
+        sem = semaphore or self._semaphore
+
+        async def _do() -> str:
+            # Hook: before_call (может модифицировать промпт)
+            before_ctx = await self.hooks.emit("before_call", HookContext(
+                event="before_call",
+                agent_name=self.name,
+                data={"message": prompt, "system_prompt": system_prompt},
+            ))
+            prompt_final = before_ctx.data.get("message", prompt)
+            sp_final = before_ctx.data.get("system_prompt", system_prompt)
+            if not isinstance(sp_final, str):
+                sp_final = system_prompt
+
+            try:
+                result_text = await backend.chat(
+                    message=prompt_final,
+                    system_prompt=sp_final,
+                    cwd=str(memory_path.resolve()),
+                    model=model,
+                    on_text_delta=on_text_delta,
+                    on_tool_use=on_tool_use,
+                    timeout=float(self.call_timeout_seconds),
+                )
+            except Exception as e:
+                logger.error(
+                    f"Backend '{spec.id}' error ({type(e).__name__}): {e}"
+                )
+                await self.hooks.emit("on_error", HookContext(
+                    event="on_error",
+                    agent_name=self.name,
+                    data={"error": e, "message": prompt_final},
+                ))
+                return self._on_user_visible_error(effective_dir)
+
+            # Успех — сбрасываем счётчик ошибок, коммитим память
+            self._consecutive_errors.pop(effective_dir, None)
+            await git_committer.commit(effective_dir)
+
+            await self.hooks.emit("after_call", HookContext(
+                event="after_call",
+                agent_name=self.name,
+                data={"message": prompt_final, "response": result_text},
+            ))
+
+            if self.consolidator and result_text:
+                self.consolidator.track(prompt_final, result_text)
+                if self.consolidator.needs_consolidation():
+                    await self.consolidator.consolidate()
+
+            return result_text or "Не удалось получить ответ."
+
+        # wait_for — backstop: сам бэкенд убивает процесс по своему таймауту,
+        # сюда доходит только если killpg по какой-то причине не сработал.
+        backstop = float(self.call_timeout_seconds) + 30
+        if sem:
+            async with sem:
+                return await asyncio.wait_for(_do(), timeout=backstop)
+        return await asyncio.wait_for(_do(), timeout=backstop)
+
+    async def _call_claude_sdk(
+        self,
+        message: str,
+        files: list[str] | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        on_tool_use: Callable[[str], Awaitable[None]] | None = None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        group_chat_id: int | None = None,
+        user_id: int | None = None,
+    ) -> str:
+        """
         Вызвать Claude через claude-agent-sdk.
 
         Args:
@@ -1125,6 +1288,16 @@ class Agent:
         Returns:
             Текстовый ответ от Claude
         """
+        # Ленивый импорт: бот без Claude CLI (и без SDK) должен стартовать.
+        from .llm.claude_cli import sdk as _sdk
+
+        _claude_sdk = _sdk()
+        AssistantMessage = _claude_sdk.AssistantMessage
+        ClaudeAgentOptions = _claude_sdk.ClaudeAgentOptions
+        ResultMessage = _claude_sdk.ResultMessage
+        TextBlock = _claude_sdk.TextBlock
+        ToolUseBlock = _claude_sdk.ToolUseBlock
+        query = _claude_sdk.query
         sem = semaphore or self._semaphore
 
         # Per-user directory (multi_user mode) or agent-level directory

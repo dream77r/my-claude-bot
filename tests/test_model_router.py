@@ -19,7 +19,7 @@ async def test_empty_message_returns_complex():
 
 @pytest.mark.asyncio
 async def test_simple_verdict():
-    async def fake_run(prompt, options):
+    async def fake_run(prompt, model):
         return "SIMPLE"
 
     with patch("src.model_router._run_classifier", fake_run):
@@ -29,7 +29,7 @@ async def test_simple_verdict():
 
 @pytest.mark.asyncio
 async def test_complex_verdict():
-    async def fake_run(prompt, options):
+    async def fake_run(prompt, model):
         return "COMPLEX"
 
     with patch("src.model_router._run_classifier", fake_run):
@@ -40,7 +40,7 @@ async def test_complex_verdict():
 @pytest.mark.asyncio
 async def test_verdict_with_surrounding_text():
     """Иногда Haiku добавляет кавычки/пояснения — парсинг должен быть терпимым."""
-    async def fake_run(prompt, options):
+    async def fake_run(prompt, model):
         return '  SIMPLE\n'
 
     with patch("src.model_router._run_classifier", fake_run):
@@ -50,7 +50,7 @@ async def test_verdict_with_surrounding_text():
 @pytest.mark.asyncio
 async def test_ambiguous_verdict_falls_back_to_complex():
     """Если в ответе и SIMPLE и COMPLEX — consider COMPLEX (безопаснее)."""
-    async def fake_run(prompt, options):
+    async def fake_run(prompt, model):
         return "SIMPLE или COMPLEX, сложно сказать"
 
     with patch("src.model_router._run_classifier", fake_run):
@@ -59,7 +59,7 @@ async def test_ambiguous_verdict_falls_back_to_complex():
 
 @pytest.mark.asyncio
 async def test_classifier_error_falls_back_to_complex():
-    async def raising(prompt, options):
+    async def raising(prompt, model):
         raise RuntimeError("SDK down")
 
     with patch("src.model_router._run_classifier", raising):
@@ -68,7 +68,7 @@ async def test_classifier_error_falls_back_to_complex():
 
 @pytest.mark.asyncio
 async def test_classifier_timeout_falls_back_to_complex():
-    async def slow(prompt, options):
+    async def slow(prompt, model):
         await asyncio.sleep(10)
         return "SIMPLE"
 
@@ -80,7 +80,7 @@ async def test_classifier_timeout_falls_back_to_complex():
 @pytest.mark.asyncio
 async def test_unknown_verdict_falls_back_to_complex():
     """Любой неразобранный ответ — COMPLEX."""
-    async def fake_run(prompt, options):
+    async def fake_run(prompt, model):
         return "MAYBE"
 
     with patch("src.model_router._run_classifier", fake_run):

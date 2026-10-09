@@ -22,10 +22,8 @@ Consolidator — умное сжатие контекста при длинны�
 import logging
 from pathlib import Path
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
-
 from . import memory
-from . import get_claude_cli_path
+from . import llm
 
 logger = logging.getLogger(__name__)
 
@@ -207,18 +205,11 @@ class Consolidator:
         prompt = _SUMMARIZE_PROMPT.format(conversation=conversation_text)
 
         try:
-            options = ClaudeAgentOptions(
-                system_prompt="Ты — помощник для суммаризации разговоров.",
-                permission_mode="bypassPermissions",
+            result_text = await llm.complete(
+                prompt=prompt,
                 model=self.summary_model,
-                cli_path=get_claude_cli_path(),
+                system_prompt="Ты — помощник для суммаризации разговоров.",
             )
-
-            result_text = ""
-            async for msg in query(prompt=prompt, options=options):
-                if isinstance(msg, ResultMessage) and msg.result:
-                    result_text = msg.result
-
             return result_text if result_text else None
 
         except Exception as e:

@@ -39,15 +39,7 @@ from datetime import datetime
 
 from .task_utils import spawn_supervised
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
-
-from . import get_claude_cli_path, memory
+from . import llm, memory
 from .bus import FleetBus, FleetMessage, MessageType
 from .cron import should_run
 from .heartbeat import check_heartbeat
@@ -246,26 +238,12 @@ class SmartHeartbeat:
         """Вызов Claude. Повторяет паттерн из heartbeat.py _call_claude."""
         memory_path = memory.get_memory_path(self.agent_dir)
 
-        options = ClaudeAgentOptions(
+        return await llm.complete(
+            prompt=prompt,
             model=model,
-            permission_mode="bypassPermissions",
-            cli_path=get_claude_cli_path(),
             cwd=str(memory_path),
+            allowed_tools=allowed_tools,
         )
-        if allowed_tools:
-            options.allowed_tools = allowed_tools
-
-        result_text = ""
-        async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        result_text += block.text
-            elif isinstance(msg, ResultMessage):
-                if msg.result and not result_text:
-                    result_text = msg.result
-
-        return result_text
 
     async def _evaluate_notification(self, response: str) -> bool:
         """Дешёвый LLM-вызов для решения, уведомлять ли пользователя."""

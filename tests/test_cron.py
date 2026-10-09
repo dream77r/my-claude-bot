@@ -154,40 +154,18 @@ class TestExecuteJobNotificationRouting:
             notify=notify,
         )
 
-    def _make_sdk_modules(self, text: str):
-        """Создаём mock-объекты claude_agent_sdk + src.memory.
+    def _make_memory_mock(self):
+        """Mock src.memory: memory_path + git_commit.
 
-        _execute_job использует lazy imports:
-          from claude_agent_sdk import AssistantMessage, ... query
-          from . import memory
-        Поэтому патчим через sys.modules.
+        _execute_job делает lazy import `from . import memory`,
+        поэтому патчим через sys.modules. Сам LLM-вызов подменяется
+        патчем `src.llm.complete` на уровне call site.
         """
-        import claude_agent_sdk as real_sdk  # убеждаемся, что SDK загружен
-
-        # Используем НАСТОЯЩИЕ классы SDK — иначе isinstance-проверки в
-        # _execute_job провалятся и result_text останется пустым.
-        real_msg = real_sdk.AssistantMessage(
-            content=[real_sdk.TextBlock(text=text)],
-            model="haiku",
-            session_id="test-session",
-        )
-
-        async def _fake_query(**kwargs):
-            yield real_msg
-
-        mock_sdk = MagicMock()
-        mock_sdk.AssistantMessage = real_sdk.AssistantMessage
-        mock_sdk.ResultMessage = real_sdk.ResultMessage
-        mock_sdk.TextBlock = real_sdk.TextBlock
-        mock_sdk.ClaudeAgentOptions = real_sdk.ClaudeAgentOptions
-        mock_sdk.query = lambda **kw: _fake_query(**kw)
-
-        # --- mock src.memory ---
         mock_memory = MagicMock()
         mock_memory.get_memory_path.return_value = "/tmp/test"
         mock_memory.git_commit = MagicMock()
 
-        return mock_sdk, mock_memory
+        return mock_memory
 
     @pytest.mark.asyncio
     async def test_master_agent_routes_to_own_channel(self):
@@ -198,8 +176,9 @@ class TestExecuteJobNotificationRouting:
         bus.subscribe("telegram:me")
 
         job = self._make_job()
-        mock_sdk, mock_memory = self._make_sdk_modules("Digest result")
-        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+        mock_memory = self._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), \
+             patch("src.llm.complete", new=AsyncMock(return_value="Digest result")):
             await _execute_job(
                 job=job,
                 agent_dir="/tmp/test",
@@ -225,8 +204,9 @@ class TestExecuteJobNotificationRouting:
         bus.subscribe("telegram:me")
 
         job = self._make_job()
-        mock_sdk, mock_memory = self._make_sdk_modules("Worker cron result")
-        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+        mock_memory = self._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), \
+             patch("src.llm.complete", new=AsyncMock(return_value="Worker cron result")):
             await _execute_job(
                 job=job,
                 agent_dir="/tmp/test",
@@ -255,8 +235,9 @@ class TestExecuteJobNotificationRouting:
         bus.subscribe("telegram:analyst")
 
         job = self._make_job()
-        mock_sdk, mock_memory = self._make_sdk_modules("some result")
-        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+        mock_memory = self._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), \
+             patch("src.llm.complete", new=AsyncMock(return_value="some result")):
             await _execute_job(
                 job=job,
                 agent_dir="/tmp/test",
@@ -281,8 +262,9 @@ class TestExecuteJobNotificationRouting:
         bus.subscribe("telegram:me")
 
         job = self._make_job(notify=False)
-        mock_sdk, mock_memory = self._make_sdk_modules("silent result")
-        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+        mock_memory = self._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), \
+             patch("src.llm.complete", new=AsyncMock(return_value="silent result")):
             await _execute_job(
                 job=job,
                 agent_dir="/tmp/test",
@@ -298,29 +280,11 @@ class TestExecuteJobNotificationRouting:
 class TestExecuteJobZeroChatIdWarning:
     """_execute_job логирует warning когда chat_id=0 и notify=True."""
 
-    def _make_sdk_modules(self, text: str):
-        import claude_agent_sdk as real_sdk
-
-        real_msg = real_sdk.AssistantMessage(
-            content=[real_sdk.TextBlock(text=text)],
-            model="haiku",
-            session_id="test-session",
-        )
-
-        async def _fake_query(**kwargs):
-            yield real_msg
-
-        mock_sdk = MagicMock()
-        mock_sdk.AssistantMessage = real_sdk.AssistantMessage
-        mock_sdk.ResultMessage = real_sdk.ResultMessage
-        mock_sdk.TextBlock = real_sdk.TextBlock
-        mock_sdk.ClaudeAgentOptions = real_sdk.ClaudeAgentOptions
-        mock_sdk.query = lambda **kw: _fake_query(**kw)
-
+    def _make_memory_mock(self):
         mock_memory = MagicMock()
         mock_memory.get_memory_path.return_value = "/tmp/test"
         mock_memory.git_commit = MagicMock()
-        return mock_sdk, mock_memory
+        return mock_memory
 
     @pytest.mark.asyncio
     async def test_warning_logged_when_chat_id_zero(self, caplog):
@@ -338,8 +302,9 @@ class TestExecuteJobZeroChatIdWarning:
             model="haiku",
             notify=True,
         )
-        mock_sdk, mock_memory = self._make_sdk_modules("some result")
-        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+        mock_memory = self._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), \
+             patch("src.llm.complete", new=AsyncMock(return_value="some result")):
             with caplog.at_level(logging.WARNING, logger="src.cron"):
                 await _execute_job(
                     job=job,
@@ -371,8 +336,9 @@ class TestExecuteJobZeroChatIdWarning:
             model="haiku",
             notify=True,
         )
-        mock_sdk, mock_memory = self._make_sdk_modules("some result")
-        with patch.dict(sys.modules, {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory}):
+        mock_memory = self._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), \
+             patch("src.llm.complete", new=AsyncMock(return_value="some result")):
             with caplog.at_level(logging.WARNING, logger="src.cron"):
                 await _execute_job(
                     job=job,
@@ -607,10 +573,9 @@ class TestCronJobTargetChat:
             chat_id=-1003804830025,
             thread_id=7,
         )
-        mock_sdk, mock_memory = helper._make_sdk_modules("Инвентаризация!")
-        with patch.dict(
-            sys.modules,
-            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        mock_memory = helper._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), patch(
+            "src.llm.complete", new=AsyncMock(return_value="Инвентаризация!")
         ):
             await _execute_job(
                 job=job,
@@ -635,10 +600,9 @@ class TestCronJobTargetChat:
         bus.subscribe("telegram:me")
 
         job = helper._make_job()
-        mock_sdk, mock_memory = helper._make_sdk_modules("Дайджест")
-        with patch.dict(
-            sys.modules,
-            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        mock_memory = helper._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), patch(
+            "src.llm.complete", new=AsyncMock(return_value="Дайджест")
         ):
             await _execute_job(
                 job=job,
@@ -685,10 +649,9 @@ class TestWorkerCronBotRouting:
         bus.subscribe("telegram:gooose")
 
         job = self._job(chat_id=-1003804830025, thread_id=11)
-        mock_sdk, mock_memory = helper._make_sdk_modules("Пора считать остатки")
-        with patch.dict(
-            sys.modules,
-            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        mock_memory = helper._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), patch(
+            "src.llm.complete", new=AsyncMock(return_value="Пора считать остатки")
         ):
             await _execute_job(
                 job=job,
@@ -718,10 +681,9 @@ class TestWorkerCronBotRouting:
         bus.subscribe("telegram:gooose")
 
         job = self._job()
-        mock_sdk, mock_memory = helper._make_sdk_modules("Отчёт")
-        with patch.dict(
-            sys.modules,
-            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        mock_memory = helper._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), patch(
+            "src.llm.complete", new=AsyncMock(return_value="Отчёт")
         ):
             await _execute_job(
                 job=job,
@@ -747,10 +709,9 @@ class TestWorkerCronBotRouting:
         bus.subscribe("telegram:me")
 
         job = self._job(chat_id=-1003804830025)
-        mock_sdk, mock_memory = helper._make_sdk_modules("Отчёт мастера")
-        with patch.dict(
-            sys.modules,
-            {"claude_agent_sdk": mock_sdk, "src.memory": mock_memory},
+        mock_memory = helper._make_memory_mock()
+        with patch.dict(sys.modules, {"src.memory": mock_memory}), patch(
+            "src.llm.complete", new=AsyncMock(return_value="Отчёт мастера")
         ):
             await _execute_job(
                 job=job,

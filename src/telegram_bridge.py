@@ -94,6 +94,7 @@ BOT_COMMANDS = [
     BotCommand("dream", "Запустить Dream-обработку памяти"),
     BotCommand("recall", "Поиск по памяти и графу: /recall <тема>"),
     BotCommand("model", "Сменить модель Claude"),
+    BotCommand("backend", "Сменить LLM-бэкенд (owner)"),
     BotCommand("stats", "Статистика использования"),
     BotCommand("agents", "Список всех агентов"),
     BotCommand("create_agent", "Создать нового агента"),
@@ -123,12 +124,63 @@ def _commands_for(is_master: bool) -> list[BotCommand]:
         return BOT_COMMANDS
     return [c for c in BOT_COMMANDS if c.command not in _MASTER_ONLY_COMMAND_NAMES]
 
-# Доступные модели Claude
-CLAUDE_MODELS = {
-    "haiku": "Haiku — быстрая, дешёвая",
-    "sonnet": "Sonnet — баланс скорости и качества",
-    "opus": "Opus — максимальное качество",
-}
+# Доступные модели Claude — теперь в src.llm.registry.BACKENDS["claude"].models.
+# Здесь оставлен реэкспорт на случай внешних импортов; новый код берёт
+# список из реестра активного бэкенда.
+def _model_keyboard(
+    current_model: str, models: dict[str, str]
+) -> InlineKeyboardMarkup:
+    """Inline-клавиатура для выбора модели активного бэкенда."""
+    buttons = []
+    for model_id, description in models.items():
+        marker = " ✓" if model_id == current_model else ""
+        buttons.append([
+            InlineKeyboardButton(
+                f"{description}{marker}",
+                callback_data=f"model:{model_id}",
+            )
+        ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _backend_keyboard(current_backend: str) -> InlineKeyboardMarkup:
+    """Inline-клавиатура для выбора глобального LLM-бэкенда."""
+    from . import llm
+
+    buttons = []
+    for backend_id, spec in llm.registry.BACKENDS.items():
+        marker = " ✓" if backend_id == current_backend else ""
+        buttons.append([
+            InlineKeyboardButton(
+                f"{spec.display_name}{marker}",
+                callback_data=f"backend:{backend_id}",
+            )
+        ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _backend_model_keyboard(
+    spec, current_model: str | None
+) -> InlineKeyboardMarkup:
+    """Клавиатура моделей бэкенда для глобального переключения.
+
+    Первая кнопка — дефолт платформы (model=""), дальше — spec.models.
+    """
+    buttons = [[
+        InlineKeyboardButton(
+            "Дефолтная модель" + (" ✓" if current_model is None else ""),
+            callback_data=f"backendmodel:{spec.id}:",
+        )
+    ]]
+    for model_id, description in spec.models.items():
+        marker = " ✓" if model_id == current_model else ""
+        buttons.append([
+            InlineKeyboardButton(
+                f"{description}{marker}",
+                callback_data=f"backendmodel:{spec.id}:{model_id}",
+            )
+        ])
+    return InlineKeyboardMarkup(buttons)
 
 
 def _main_keyboard() -> InlineKeyboardMarkup:
@@ -151,20 +203,6 @@ def _main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔁 Перезапуск", callback_data="cmd:restart"),
         ],
     ])
-
-
-def _model_keyboard(current_model: str) -> InlineKeyboardMarkup:
-    """Inline-клавиатура для выбора модели."""
-    buttons = []
-    for model_id, description in CLAUDE_MODELS.items():
-        marker = " ✓" if model_id == current_model else ""
-        buttons.append([
-            InlineKeyboardButton(
-                f"{description}{marker}",
-                callback_data=f"model:{model_id}",
-            )
-        ])
-    return InlineKeyboardMarkup(buttons)
 
 
 async def send_long_message(
@@ -357,6 +395,7 @@ class TelegramBridge(
         router.exact("/dream", self._cmd_dream)
         router.exact("/recall", self._cmd_recall)
         router.exact("/model", self._cmd_model)
+        router.exact("/backend", self._cmd_backend)
         router.exact("/stats", self._cmd_stats)
 
         # Agent Manager commands
@@ -473,7 +512,7 @@ class TelegramBridge(
 
     # Команды, доступные только владельцу (allowed_users) в группах
     _OWNER_ONLY_COMMANDS = {
-        "/model", "/restore", "/dream", "/newsession", "/memory", "/start",
+        "/model", "/backend", "/restore", "/dream", "/newsession", "/memory", "/start",
         "/agents", "/create_agent", "/stop_agent", "/start_agent", "/restart",
         "/setup_dashboard",
     }
@@ -569,16 +608,94 @@ class TelegramBridge(
         # Выбор модели: model:sonnet, model:opus, model:haiku
         if query.data.startswith("model:"):
             model_id = query.data[6:]
-            if model_id in CLAUDE_MODELS:
-                memory.set_setting(user_dir, "claude_model", model_id)
+            from . import llm
+
+            backend_id = self.agent.backend or llm.manager.load().backend
+            spec = llm.registry.BACKENDS.get(backend_id)
+            models = spec.models if spec else {}
+            if model_id in models:
+                # Ключ настройки: claude_model для Claude (back-compat с
+                # settings.json), backend_model для остальных бэкендов
+                if backend_id == "claude":
+                    memory.set_setting(user_dir, "claude_model", model_id)
+                else:
+                    memory.set_setting(user_dir, "backend_model", model_id)
                 # Обновить кнопки — показать галочку на выбранной модели
                 try:
                     await query.edit_message_text(
-                        f"Модель изменена на {CLAUDE_MODELS[model_id]}",
-                        reply_markup=_model_keyboard(model_id),
+                        f"Модель изменена на {models[model_id]}",
+                        reply_markup=_model_keyboard(model_id, models),
                     )
                 except Exception:
                     pass
+            else:
+                try:
+                    await query.edit_message_text(
+                        f"Неизвестная модель: {model_id}"
+                    )
+                except Exception:
+                    pass
+            return
+
+        # Выбор глобального бэкенда: backend:codex
+        if query.data.startswith("backend:"):
+            backend_id = query.data[8:]
+            from . import llm
+
+            spec = llm.registry.BACKENDS.get(backend_id)
+            if not spec:
+                try:
+                    await query.edit_message_text(
+                        f"Неизвестный бэкенд: {backend_id}"
+                    )
+                except Exception:
+                    pass
+                return
+            if not spec.models:
+                # Список моделей не задан — сразу применяем дефолт платформы
+                llm.manager.set_global(backend_id, None)
+                try:
+                    await query.edit_message_text(
+                        f"✅ Бэкенд: {spec.display_name} "
+                        f"(модель платформы по умолчанию). "
+                        f"Применено ко всем агентам."
+                    )
+                except Exception:
+                    pass
+                return
+            # Показать модели выбранного бэкенда
+            try:
+                await query.edit_message_text(
+                    f"Бэкенд: {spec.display_name}\n\nВыбери модель:",
+                    reply_markup=_backend_model_keyboard(spec, None),
+                )
+            except Exception:
+                pass
+            return
+
+        # Выбор модели для глобального бэкенда: backendmodel:codex:gpt-5.1
+        if query.data.startswith("backendmodel:"):
+            _, backend_id, model_id = query.data.split(":", 2)
+            from . import llm
+
+            spec = llm.registry.BACKENDS.get(backend_id)
+            if not spec:
+                try:
+                    await query.edit_message_text(
+                        f"Неизвестный бэкенд: {backend_id}"
+                    )
+                except Exception:
+                    pass
+                return
+            llm.manager.set_global(backend_id, model_id or None)
+            try:
+                await query.edit_message_text(
+                    f"✅ Бэкенд: {spec.display_name}, "
+                    f"модель: {model_id or 'по умолчанию'}. "
+                    f"Применено ко всем агентам."
+                )
+            except Exception:
+                pass
             return
 
         # Настройка группы из DM: grp_setup:{chat_id}
@@ -1056,23 +1173,74 @@ class TelegramBridge(
     async def _cmd_model(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
     ) -> None:
-        """Показать / сменить модель Claude."""
-        # Текущая модель: settings override → agent.yaml default
-        current = (
-            memory.get_setting(self._effective_dir(update), "claude_model")
-            or self.agent.claude_model
-        )
+        """Показать / сменить модель активного LLM-бэкенда."""
+        from . import llm
 
-        chat_id = update.effective_chat.id
-        text = f"Текущая модель: {CLAUDE_MODELS.get(current, current)}\n\nВыбери модель:"
+        # Эффективный бэкенд: agent.yaml override → глобальный выбор
+        backend_id = self.agent.backend or llm.manager.load().backend
+        spec = llm.registry.BACKENDS.get(backend_id) \
+            or llm.registry.BACKENDS["claude"]
+
+        if not spec.models:
+            text = (
+                "У этого бэкенда список моделей не задан — "
+                "используется дефолт платформы"
+            )
+            if update.message:
+                await update.message.reply_text(text)
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id, text=text
+                )
+            return
+
+        # Текущая модель: claude → settings override → agent.yaml (back-compat);
+        # прочие бэкенды → только settings override
+        user_dir = self._effective_dir(update)
+        if backend_id == "claude":
+            current = (
+                memory.get_setting(user_dir, "claude_model")
+                or self.agent.claude_model
+            )
+        else:
+            current = memory.get_setting(user_dir, "backend_model") or ""
+
+        current_desc = spec.models.get(current) if current else None
+        text = (
+            f"Бэкенд: {spec.display_name}\n"
+            f"Текущая модель: {current_desc or current or 'по умолчанию'}"
+            f"\n\nВыбери модель:"
+        )
 
         if update.message:
             await update.message.reply_text(
-                text, reply_markup=_model_keyboard(current)
+                text, reply_markup=_model_keyboard(current, spec.models)
             )
         else:
             await context.bot.send_message(
-                chat_id=chat_id, text=text, reply_markup=_model_keyboard(current)
+                chat_id=update.effective_chat.id, text=text,
+                reply_markup=_model_keyboard(current, spec.models),
+            )
+
+    async def _cmd_backend(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
+        """Показать / сменить глобальный LLM-бэкенд (owner)."""
+        from . import llm
+
+        current = llm.manager.load().backend
+        spec = llm.registry.BACKENDS.get(current) \
+            or llm.registry.BACKENDS["claude"]
+        text = f"Текущий бэкенд: {spec.display_name}\n\nВыбери бэкенд:"
+
+        if update.message:
+            await update.message.reply_text(
+                text, reply_markup=_backend_keyboard(current)
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=text,
+                reply_markup=_backend_keyboard(current),
             )
 
     # ── Fleet & Skill commands → bridge/fleet.py ──

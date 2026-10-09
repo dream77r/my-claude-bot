@@ -89,6 +89,7 @@ def test_new_agent_template_policy():
         description="тестовый агент",
         allowed_users_yaml="  - 123\n",
         model="sonnet",
+        backend="null",
     )
     config = yaml.safe_load(rendered)
 
