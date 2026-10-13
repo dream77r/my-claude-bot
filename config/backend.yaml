@@ -1,0 +1,3 @@
+backend: codex
+internal_model: null
+model: gpt-6-luna

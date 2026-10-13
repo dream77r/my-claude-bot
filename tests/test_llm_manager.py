@@ -33,13 +33,13 @@ def test_load_defaults_to_claude_without_config(isolated_config):
 def test_load_reads_config_file(isolated_config):
     (isolated_config / "backend.yaml").write_text(
         yaml.safe_dump(
-            {"backend": "codex", "model": "gpt-5.1", "internal_model": "mini"}
+            {"backend": "codex", "model": "gpt-6.1-sol", "internal_model": "mini"}
         ),
         encoding="utf-8",
     )
     cfg = manager.load()
     assert cfg.backend == "codex"
-    assert cfg.model == "gpt-5.1"
+    assert cfg.model == "gpt-6.1-sol"
     assert cfg.internal_model == "mini"
 
 
@@ -56,10 +56,10 @@ def test_load_env_var_used_when_no_config_file(isolated_config, monkeypatch):
 
 
 def test_set_global_writes_yaml_and_load_returns_it(isolated_config):
-    manager.set_global("codex", model="gpt-5.1")
+    manager.set_global("codex", model="gpt-6.1-sol")
     cfg = manager.load()
     assert cfg.backend == "codex"
-    assert cfg.model == "gpt-5.1"
+    assert cfg.model == "gpt-6.1-sol"
     # Файл на диске тоже записан
     data = yaml.safe_load(
         (isolated_config / "backend.yaml").read_text(encoding="utf-8")
@@ -78,19 +78,19 @@ def test_resolve_agent_backend_overrides_global(isolated_config):
     manager.set_global("claude")
     spec, model = manager.resolve(agent_backend="codex")
     assert spec.id == "codex"
-    assert model == "gpt-5.1-codex"  # default_model бэкенда
+    assert model == "gpt-6-luna"  # default_model бэкенда
 
 
 def test_resolve_user_model_applies_only_when_in_models(isolated_config):
     manager.set_global("claude")
     spec, model = manager.resolve(
-        agent_backend="codex", user_model="gpt-5.1"
+        agent_backend="codex", user_model="gpt-6.1-sol"
     )
-    assert model == "gpt-5.1"
+    assert model == "gpt-6.1-sol"
 
     # Неизвестная модель игнорируется — падаем на дефолт бэкенда
     _, model = manager.resolve(agent_backend="codex", user_model="bogus")
-    assert model == "gpt-5.1-codex"
+    assert model == "gpt-6-luna"
 
 
 def test_resolve_user_model_any_when_models_list_empty(isolated_config):
@@ -103,16 +103,16 @@ def test_resolve_user_model_any_when_models_list_empty(isolated_config):
 def test_resolve_agent_backend_model_fallback(isolated_config):
     manager.set_global("claude")
     _, model = manager.resolve(
-        agent_backend="codex", agent_backend_model="gpt-5.1-codex-mini"
+        agent_backend="codex", agent_backend_model="gpt-6-luna"
     )
-    assert model == "gpt-5.1-codex-mini"
+    assert model == "gpt-6-luna"
 
 
 def test_resolve_global_model_fallback(isolated_config):
-    manager.set_global("codex", model="gpt-5.1")
+    manager.set_global("codex", model="gpt-6.1-sol")
     spec, model = manager.resolve()
     assert spec.id == "codex"
-    assert model == "gpt-5.1"
+    assert model == "gpt-6.1-sol"
 
 
 def test_resolve_default_model_last_resort(isolated_config):

@@ -93,7 +93,7 @@ BOT_COMMANDS = [
     BotCommand("restore", "Откатить память"),
     BotCommand("dream", "Запустить Dream-обработку памяти"),
     BotCommand("recall", "Поиск по памяти и графу: /recall <тема>"),
-    BotCommand("model", "Сменить модель Claude"),
+    BotCommand("model", "Выбрать модель: /model [имя модели]"),
     BotCommand("backend", "Сменить LLM-бэкенд (owner)"),
     BotCommand("stats", "Статистика использования"),
     BotCommand("agents", "Список всех агентов"),
@@ -1181,6 +1181,27 @@ class TelegramBridge(
         spec = llm.registry.BACKENDS.get(backend_id) \
             or llm.registry.BACKENDS["claude"]
 
+        user_dir = self._effective_dir(update)
+        requested = args.strip()
+        if requested:
+            if requested not in spec.models:
+                await self._reply(
+                    update, context,
+                    f"Модели {requested} нет в списке {spec.display_name}. "
+                    "Открой /model для выбора. Другой провайдер: /backend.",
+                )
+                return
+            key = "claude_model" if backend_id == "claude" else "backend_model"
+            memory.set_setting(user_dir, key, requested)
+            await self._reply(
+                update, context,
+                f"Выбрана модель {requested} ({spec.display_name}). "
+                "Применится к следующему запросу. "
+                "Доступ к модели определяется твоим аккаунтом.",
+                reply_markup=_model_keyboard(requested, spec.models),
+            )
+            return
+
         if not spec.models:
             text = (
                 "У этого бэкенда список моделей не задан — "
@@ -1195,21 +1216,25 @@ class TelegramBridge(
             return
 
         # Текущая модель: claude → settings override → agent.yaml (back-compat);
-        # прочие бэкенды → только settings override
-        user_dir = self._effective_dir(update)
+        # прочие бэкенды → тот же порядок, что при вызове модели
         if backend_id == "claude":
             current = (
                 memory.get_setting(user_dir, "claude_model")
                 or self.agent.claude_model
             )
         else:
-            current = memory.get_setting(user_dir, "backend_model") or ""
+            _, current = llm.resolve(
+                agent_backend=backend_id,
+                agent_backend_model=self.agent.backend_model,
+                user_model=memory.get_setting(user_dir, "backend_model"),
+            )
 
         current_desc = spec.models.get(current) if current else None
         text = (
             f"Бэкенд: {spec.display_name}\n"
             f"Текущая модель: {current_desc or current or 'по умолчанию'}"
             f"\n\nВыбери модель:"
+            f"\nИли отправь /model имя_модели из списка."
         )
 
         if update.message:

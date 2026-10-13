@@ -143,6 +143,19 @@ def _codex_sample_lines():
 
 
 @pytest.mark.asyncio
+async def test_codex_native_events_ignore_snapshots_and_tool_output():
+    stream = _CodexStream(None, None)
+    for line in [
+        '{"type":"item.started","item":{"type":"agent_message","text":"partial"}}',
+        '{"type":"item.updated","item":{"type":"agent_message","text":"partial answer"}}',
+        '{"type":"item.completed","item":{"type":"command_execution","text":"tool output"}}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}',
+    ]:
+        await stream.on_line(line)
+    assert stream.text.strip() == "final answer"
+
+
+@pytest.mark.asyncio
 async def test_codex_stream_accumulates_text_and_emits_deltas():
     recorder = _DeltaRecorder()
     tool_hints = []

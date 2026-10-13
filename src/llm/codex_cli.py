@@ -1,8 +1,8 @@
 """
 Адаптер OpenAI Codex CLI.
 
-Headless-режим: `codex exec --json --sandbox <mode> --ask-for-approval never
-[-s model] "<prompt>"`. stdout — JSONL-события (agent_message/delta,
+Headless-режим: `codex --ask-for-approval never exec --json --sandbox <mode>
+[-m model] "<prompt>"`. stdout — JSONL-события (agent_message/delta,
 turn.completed и т.п.). Флаги сверены с `codex exec --help` (v2025+); при
 смене CLI — смотреть CliRunError со stderr.
 """
@@ -13,7 +13,8 @@ import json
 import logging
 import os
 
-from .base import BackendSpec, OnTextDelta, OnToolUse
+from .base import OnTextDelta, OnToolUse
+from .registry import get_spec
 from .cli_common import (
     compose_prompt,
     extract_content_text,
@@ -26,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 def _event_text(obj: dict) -> str:
+    item = obj.get("item")
+    if isinstance(item, dict):
+        # Codex exec emits the full assistant message on item.completed.
+        # Ignore started/updated snapshots to avoid repeating the final text.
+        if obj.get("type") == "item.completed" and item.get("type") == "agent_message":
+            return extract_content_text(item.get("text"))
+        return ""
     msg = obj.get("message")
     if isinstance(msg, dict):
         text = extract_content_text(msg.get("content"))
@@ -77,24 +85,14 @@ class _CodexStream:
 
 
 class CodexCliBackend:
-    spec = BackendSpec(
-        id="codex",
-        display_name="OpenAI Codex",
-        cli_command="codex",
-        cli_path_env="CODEX_CLI_PATH",
-        default_model="gpt-5.1-codex",
-        models={},
-        cheap_model="gpt-5.1-codex-mini",
-        strong_model="gpt-5.1",
-    )
+    spec = get_spec("codex")
 
     def _argv(self, prompt: str, model: str | None, sandbox: str) -> list[str]:
         path = resolve_cli_path(self.spec.cli_command, self.spec.cli_path_env)
         argv = [
-            path, "exec",
+            path, "--ask-for-approval", "never", "exec",
             "--json",
             "--sandbox", sandbox,
-            "--ask-for-approval", "never",
             "--skip-git-repo-check",
         ]
         if model:

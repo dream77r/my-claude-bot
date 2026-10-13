@@ -18,6 +18,7 @@ class _Agent:
     is_master = True
     is_multi_user = False
     backend = None
+    backend_model = None
     claude_model = "sonnet"
 
     def is_user_allowed(self, user_id: int) -> bool:
@@ -116,14 +117,14 @@ async def test_backendmodel_callback_calls_set_global_default(bridge):
 
 @pytest.mark.asyncio
 async def test_backendmodel_callback_calls_set_global_with_model(bridge):
-    update, query = _callback_update("backendmodel:codex:gpt-5.1")
+    update, query = _callback_update("backendmodel:codex:gpt-6.1-sol")
 
     with patch("src.llm.manager.set_global") as set_global:
         await bridge._handle_callback(update, None)
 
-    set_global.assert_called_once_with("codex", "gpt-5.1")
+    set_global.assert_called_once_with("codex", "gpt-6.1-sol")
     text = query.edit_message_text.await_args.args[0]
-    assert "gpt-5.1" in text
+    assert "gpt-6.1-sol" in text
 
 
 @pytest.mark.asyncio
@@ -163,3 +164,66 @@ async def test_unknown_backendmodel_ignored_gracefully(bridge):
     set_global.assert_not_called()
     text = query.edit_message_text.await_args.args[0]
     assert "Неизвестный бэкенд" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_button", [False, True])
+async def test_codex_model_selection_reaches_cli(bridge, tmp_path, via_button):
+    from src import memory
+    from src.llm import manager
+    from src.llm.codex_cli import CodexCliBackend
+
+    (tmp_path / "memory").mkdir()
+    bridge.agent.agent_dir = str(tmp_path)
+    bridge.agent.get_effective_dir = lambda uid: str(tmp_path)
+    with patch("src.llm.manager.load", return_value=BackendConfig("codex")):
+        if via_button:
+            update, _ = _callback_update("model:gpt-6.1-sol")
+            await bridge._handle_callback(update, None)
+        else:
+            await bridge._cmd_model(_cmd_update(), None, "gpt-6.1-sol")
+        _, selected = manager.resolve(
+            user_model=memory.get_setting(str(tmp_path), "backend_model"),
+        )
+    assert selected == "gpt-6.1-sol"
+
+    async def fake_run_cli(**kwargs):
+        argv = kwargs["argv"]
+        assert argv[argv.index("--model") + 1] == selected
+        assert argv.index("--ask-for-approval") < argv.index("exec")
+        await kwargs["on_stdout_line"](
+            '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
+        )
+
+    with patch("src.llm.codex_cli.resolve_cli_path", return_value="codex"), \
+         patch("src.llm.codex_cli.run_cli", side_effect=fake_run_cli):
+        result = await CodexCliBackend().chat(
+            message="test", system_prompt="", cwd=str(tmp_path), model=selected,
+        )
+    assert result == "OK"
+
+
+@pytest.mark.asyncio
+async def test_model_menu_displays_effective_global_model(bridge, tmp_path):
+    bridge.agent.agent_dir = str(tmp_path)
+    update = _cmd_update()
+    with patch("src.llm.manager.load", return_value=BackendConfig("codex", "gpt-6-astra")):
+        await bridge._cmd_model(update, None, "")
+    call = update.message.reply_text.await_args
+    assert "GPT-6 Astra" in call.args[0]
+    buttons = {
+        b.callback_data: b.text
+        for row in call.kwargs["reply_markup"].inline_keyboard for b in row
+    }
+    assert "✓" in buttons["model:gpt-6-astra"]
+    assert "model:gpt-6.1-sol" in buttons
+
+
+@pytest.mark.asyncio
+async def test_model_command_rejects_other_backend_model(bridge, tmp_path):
+    bridge.agent.agent_dir = str(tmp_path)
+    with patch("src.llm.manager.load", return_value=BackendConfig("claude")), \
+         patch("src.telegram_bridge.memory.set_setting") as save:
+        await bridge._cmd_model(_cmd_update(), None, "gpt-6.1-sol")
+    save.assert_not_called()
+    assert "/backend" in bridge._reply.await_args.args[2]
