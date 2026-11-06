@@ -19,6 +19,13 @@ from typing import TYPE_CHECKING
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from ..fleet_control import (
+    is_master_agent,
+    load_flags,
+    read_allowed_users,
+    update_flags,
+    write_allowed_users,
+)
 from ..status_message import StatusMessage
 
 if TYPE_CHECKING:
@@ -32,6 +39,34 @@ class FleetCommandsMixin:
     Команды управления флотом, скиллами, доступом + wizards.
     """
 
+    async def _fleet_guard(
+        self: TelegramBridge,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        """True — команда отклонена, ответ уже отправлен.
+
+        Рулить флотом можно только из оркестратора (мастер-агент).
+        """
+        if not getattr(self.agent, "is_master", False):
+            await self._reply(
+                update, context,
+                "Управлять флотом может только оркестратор (мастер-агент).",
+            )
+            return True
+        if not self.fleet_runtime:
+            await self._reply(update, context, "Agent Manager недоступен.")
+            return True
+        return False
+
+    def _fleet_agent_dir(self: TelegramBridge, name: str):
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            return None
+        path = self.fleet_runtime.root / "agents" / name
+        if not (path / "agent.yaml").is_file():
+            return None
+        return path
+
     # ── Agent Manager commands ──
 
     async def _cmd_agents(
@@ -41,8 +76,7 @@ class FleetCommandsMixin:
         args: str,
     ) -> None:
         """Список всех агентов и их статус."""
-        if not self.fleet_runtime:
-            await self._reply(update, context, "Agent Manager недоступен.")
+        if await self._fleet_guard(update, context):
             return
 
         agents = self.fleet_runtime.manager.list_agents()
@@ -60,12 +94,28 @@ class FleetCommandsMixin:
             else:
                 status = "⚪ нет токена"
 
+            flags = load_flags(self.fleet_runtime.root / "agents" / a["name"])
+            if not flags.enabled:
+                policy = "выключен, после рестарта не поднимется"
+            elif not flags.notifications:
+                policy = "уведомления выключены"
+            else:
+                policy = "уведомления включены"
             lines.append(
                 f"  {a['name']} — {a['display_name']}\n"
-                f"    Модель: {a['model']} | {status}"
+                f"    Модель: {a['model']} | {status} | {policy}"
             )
 
         lines.append(f"\nВсего: {len(agents)}")
+        lines.append(
+            "\nУправление:\n"
+            "  /disable_agent имя — выключить и не поднимать после рестарта\n"
+            "  /enable_agent имя — включить и запустить\n"
+            "  /mute_agent имя — бот отвечает, фон молчит\n"
+            "  /unmute_agent имя — вернуть уведомления\n"
+            "  /set_access имя — кто может писать\n"
+            "  /stop_agent и /start_agent — только до перезапуска"
+        )
         await self._reply(update, context, "\n".join(lines))
 
     async def _cmd_create_agent(
@@ -75,8 +125,7 @@ class FleetCommandsMixin:
         args: str,
     ) -> None:
         """Начать визард создания агента."""
-        if not self.fleet_runtime:
-            await self._reply(update, context, "Agent Manager недоступен.")
+        if await self._fleet_guard(update, context):
             return
 
         chat_id = update.effective_chat.id
@@ -381,8 +430,7 @@ class FleetCommandsMixin:
         args: str,
     ) -> None:
         """Клонировать агента: /clone_agent source_name"""
-        if not self.fleet_runtime:
-            await self._reply(update, context, "Agent Manager недоступен.")
+        if await self._fleet_guard(update, context):
             return
 
         source_name = args.strip()
@@ -536,8 +584,7 @@ class FleetCommandsMixin:
         args: str,
     ) -> None:
         """Управление доступом: /set_access agent_name [user_id | forward | all | lock]"""
-        if not self.fleet_runtime:
-            await self._reply(update, context, "Agent Manager недоступен.")
+        if await self._fleet_guard(update, context):
             return
 
         parts = args.strip().split(None, 1)
@@ -573,7 +620,7 @@ class FleetCommandsMixin:
         with open(agent_yaml_path, encoding="utf-8") as f:
             raw = f.read()
         config = _yaml.safe_load(raw)
-        current_users = config.get("allowed_users", [])
+        current_users = read_allowed_users(agent_yaml_path.parent)
 
         # Только показать текущий доступ
         if len(parts) == 1:
@@ -585,9 +632,7 @@ class FleetCommandsMixin:
                 new_id = fwd_user.id
                 if current_users and new_id not in current_users:
                     current_users.append(new_id)
-                    config["allowed_users"] = current_users
-                    with open(agent_yaml_path, "w", encoding="utf-8") as f:
-                        _yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+                    write_allowed_users(agent_yaml_path.parent, current_users)
                     await self._reply(
                         update, context,
                         f"Добавлен доступ: {new_id} ({fwd_user.first_name or ''}) → '{agent_name}'\n"
@@ -670,9 +715,8 @@ class FleetCommandsMixin:
             )
             return
 
-        # Сохранить
-        with open(agent_yaml_path, "w", encoding="utf-8") as f:
-            _yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+        # Сохранить в оверлей, базовый agent.yaml не переписываем.
+        write_allowed_users(agent_yaml_path.parent, config["allowed_users"])
 
         if not config["allowed_users"]:
             result = "открытый доступ (все)"
@@ -692,8 +736,7 @@ class FleetCommandsMixin:
         args: str,
     ) -> None:
         """Остановить агента: /stop_agent name"""
-        if not self.fleet_runtime:
-            await self._reply(update, context, "Agent Manager недоступен.")
+        if await self._fleet_guard(update, context):
             return
 
         name = args.strip()
@@ -720,8 +763,7 @@ class FleetCommandsMixin:
         args: str,
     ) -> None:
         """Запустить агента: /start_agent name"""
-        if not self.fleet_runtime:
-            await self._reply(update, context, "Agent Manager недоступен.")
+        if await self._fleet_guard(update, context):
             return
 
         name = args.strip()
@@ -735,6 +777,134 @@ class FleetCommandsMixin:
 
         ok, msg = await self.fleet_runtime.start_agent(name)
         await self._reply(update, context, msg)
+
+    async def _resolve_fleet_target(
+        self: TelegramBridge,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        args: str,
+        usage: str,
+    ):
+        """Имя агента из аргумента. None, если ответили ошибкой."""
+        name = args.strip().split()[0] if args.strip() else ""
+        if not name:
+            await self._reply(update, context, usage)
+            return None
+        path = self._fleet_agent_dir(name)
+        if path is None:
+            await self._reply(update, context, f"Агент '{name}' не найден. Список: /agents")
+            return None
+        return path
+
+    async def _cmd_disable_agent(
+        self: TelegramBridge,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        args: str,
+    ) -> None:
+        """Выключить агента насовсем: /disable_agent name"""
+        if await self._fleet_guard(update, context):
+            return
+        path = await self._resolve_fleet_target(
+            update, context, args,
+            "Укажи имя: /disable_agent <имя>\nСписок: /agents",
+        )
+        if path is None:
+            return
+        name = path.name
+        if name == self.agent.name or is_master_agent(path):
+            await self._reply(update, context, "Оркестратора выключить нельзя.")
+            return
+        update_flags(path, enabled=False)
+        if self.fleet_runtime.is_running(name):
+            await self.fleet_runtime.stop_agent(name)
+        await self._reply(
+            update, context,
+            f"Агент '{name}' выключен. Сейчас остановлен и после перезапуска "
+            f"сам не поднимется, уведомления не пойдут.\n"
+            f"Вернуть: /enable_agent {name}",
+        )
+
+    async def _cmd_enable_agent(
+        self: TelegramBridge,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        args: str,
+    ) -> None:
+        """Включить агента: /enable_agent name"""
+        if await self._fleet_guard(update, context):
+            return
+        path = await self._resolve_fleet_target(
+            update, context, args,
+            "Укажи имя: /enable_agent <имя>\nСписок: /agents",
+        )
+        if path is None:
+            return
+        name = path.name
+        update_flags(path, enabled=True, notifications=True)
+        ok, msg = await self.fleet_runtime.start_agent(name)
+        if ok:
+            await self._reply(
+                update, context,
+                f"Агент '{name}' включён и запущен. Уведомления тоже включены.",
+            )
+        elif self.fleet_runtime.is_running(name):
+            await self._reply(
+                update, context,
+                f"Агент '{name}' включён. Он уже был запущен, уведомления включены.",
+            )
+        else:
+            await self._reply(
+                update, context,
+                f"Агент '{name}' включён в настройках, но не запустился: {msg}",
+            )
+
+    async def _cmd_mute_agent(
+        self: TelegramBridge,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        args: str,
+    ) -> None:
+        """Заглушить проактивные уведомления: /mute_agent name"""
+        if await self._fleet_guard(update, context):
+            return
+        path = await self._resolve_fleet_target(
+            update, context, args,
+            "Укажи имя: /mute_agent <имя>\nСписок: /agents",
+        )
+        if path is None:
+            return
+        name = path.name
+        update_flags(path, notifications=False)
+        await self._reply(
+            update, context,
+            f"Уведомления '{name}' выключены. На сообщения он отвечает, "
+            f"фоновые проверки, cron и дайджесты в чат не приходят.\n"
+            f"Вернуть: /unmute_agent {name}\n"
+            f"Выключить совсем: /disable_agent {name}",
+        )
+
+    async def _cmd_unmute_agent(
+        self: TelegramBridge,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        args: str,
+    ) -> None:
+        """Вернуть проактивные уведомления: /unmute_agent name"""
+        if await self._fleet_guard(update, context):
+            return
+        path = await self._resolve_fleet_target(
+            update, context, args,
+            "Укажи имя: /unmute_agent <имя>\nСписок: /agents",
+        )
+        if path is None:
+            return
+        name = path.name
+        update_flags(path, notifications=True)
+        await self._reply(
+            update, context,
+            f"Уведомления '{name}' снова включены.",
+        )
 
     # ── Skill Creator commands ──
 

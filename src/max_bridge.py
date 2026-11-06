@@ -678,6 +678,14 @@ class MaxBridge:
         while True:
             try:
                 msg = await self.bus.consume(queue_name)
+                from .fleet_control import should_drop_proactive
+
+                if should_drop_proactive(msg, self.agent.agent_dir):
+                    logger.info(
+                        "MAX: проактивное уведомление подавлено политикой флота: "
+                        f"origin={msg.metadata.get('origin_agent') or msg.source}"
+                    )
+                    continue
                 await self._dispatch_outbound(msg)
             except asyncio.CancelledError:
                 logger.info(f"MAX bus listener '{queue_name}' остановлен")

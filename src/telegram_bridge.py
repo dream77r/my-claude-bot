@@ -101,6 +101,10 @@ BOT_COMMANDS = [
     BotCommand("clone_agent", "Клонировать агента"),
     BotCommand("stop_agent", "Остановить агента"),
     BotCommand("start_agent", "Запустить агента"),
+    BotCommand("disable_agent", "Выключить агента и не поднимать"),
+    BotCommand("enable_agent", "Включить агента обратно"),
+    BotCommand("mute_agent", "Заглушить уведомления агента"),
+    BotCommand("unmute_agent", "Вернуть уведомления агента"),
     BotCommand("skills", "Список скиллов агента"),
     BotCommand("newskill", "Создать новый скилл"),
     BotCommand("removeskill", "Удалить скилл"),
@@ -116,7 +120,20 @@ BOT_COMMANDS = [
 # Команды, которые показываются в меню только у master-агента.
 # На non-master ботах они скрываются из `/`-меню (хендлеры остаются
 # зарегистрированными и вернут вежливый отказ, если юзер введёт руками).
-_MASTER_ONLY_COMMAND_NAMES = frozenset({"dashboard", "setup_dashboard"})
+_MASTER_ONLY_COMMAND_NAMES = frozenset({
+    "dashboard",
+    "setup_dashboard",
+    "disable_agent",
+    "enable_agent",
+    "mute_agent",
+    "unmute_agent",
+    "set_access",
+    "create_agent",
+    "clone_agent",
+    "stop_agent",
+    "start_agent",
+    "agents",
+})
 
 
 def _commands_for(is_master: bool) -> list[BotCommand]:
@@ -405,6 +422,10 @@ class TelegramBridge(
         router.exact("/set_access", self._cmd_set_access)
         router.exact("/stop_agent", self._cmd_stop_agent)
         router.exact("/start_agent", self._cmd_start_agent)
+        router.exact("/disable_agent", self._cmd_disable_agent)
+        router.exact("/enable_agent", self._cmd_enable_agent)
+        router.exact("/mute_agent", self._cmd_mute_agent)
+        router.exact("/unmute_agent", self._cmd_unmute_agent)
 
         # Skill Creator commands
         router.exact("/skills", self._cmd_skills)
@@ -513,7 +534,9 @@ class TelegramBridge(
     # Команды, доступные только владельцу (allowed_users) в группах
     _OWNER_ONLY_COMMANDS = {
         "/model", "/backend", "/restore", "/dream", "/newsession", "/memory", "/start",
-        "/agents", "/create_agent", "/stop_agent", "/start_agent", "/restart",
+        "/agents", "/create_agent", "/stop_agent", "/start_agent",
+        "/disable_agent", "/enable_agent", "/mute_agent", "/unmute_agent",
+        "/set_access", "/clone_agent", "/restart",
         "/setup_dashboard",
     }
 
@@ -1294,6 +1317,14 @@ class TelegramBridge(
         while True:
             try:
                 msg = await self.bus.consume(queue_name)
+                from .fleet_control import should_drop_proactive
+
+                if should_drop_proactive(msg, self.agent.agent_dir):
+                    logger.info(
+                        "Проактивное уведомление подавлено политикой флота: "
+                        f"origin={msg.metadata.get('origin_agent') or msg.source}"
+                    )
+                    continue
                 chat_id = msg.chat_id
                 if not chat_id:
                     # Fallback: попытаться получить FOUNDER_TELEGRAM_ID

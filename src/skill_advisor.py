@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from . import memory
 from .bus import FleetBus, FleetMessage, MessageType
+from .fleet_control import proactive_meta
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +553,7 @@ async def run_daily_digest(
         content=digest,
         msg_type=MessageType.OUTBOUND,
         chat_id=chat_id,
+        metadata=proactive_meta(master_name),
     )
     await bus.publish(notification)
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from . import memory
 from . import llm
 from .bus import FleetBus, FleetMessage, MessageType
+from .fleet_control import proactive_meta
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,7 @@ async def heartbeat_loop(
                     content=f"[Heartbeat] {result['notification']}",
                     msg_type=MessageType.OUTBOUND,
                     chat_id=chat_id,
+                    metadata=proactive_meta(agent_name),
                 )
                 await bus.publish(msg)
                 logger.info(f"Heartbeat: уведомление отправлено в чат {chat_id}")

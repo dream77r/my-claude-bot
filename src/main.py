@@ -167,6 +167,15 @@ def load_agents(root: Path) -> list[Agent]:
     agents = []
     for agent_yaml in sorted(agents_dir.glob("*/agent.yaml")):
         try:
+            from .fleet_control import load_flags
+
+            if not load_flags(agent_yaml.parent).enabled:
+                logger.info(
+                    f"Агент '{agent_yaml.parent.name}' выключен "
+                    "(fleet.enabled: false) — не запускаю"
+                )
+                continue
+
             agent = Agent(str(agent_yaml))
 
             # Пропустить агента если bot_token не задан в .env
@@ -251,6 +260,14 @@ class FleetRuntime:
         agent_yaml = self.root / "agents" / name / "agent.yaml"
         if not agent_yaml.exists():
             return False, f"Агент '{name}' не найден"
+
+        from .fleet_control import load_flags
+
+        if not load_flags(agent_yaml.parent).enabled:
+            return False, (
+                f"Агент '{name}' выключен. "
+                f"Включи его из оркестратора: /enable_agent {name}"
+            )
 
         # Перезагрузить .env чтобы подхватить новые токены
         env_file = self.root / ".env"

@@ -41,6 +41,7 @@ from datetime import datetime
 
 from . import llm
 from .bus import FleetBus, FleetMessage, MessageType
+from .fleet_control import proactive_meta
 from .task_utils import spawn_supervised
 
 logger = logging.getLogger(__name__)
@@ -265,9 +266,10 @@ async def _execute_job(
                 f"Cron '{job.name}': chat_id=0, уведомление не будет доставлено. "
                 f"Укажите chat_id у задачи или FOUNDER_TELEGRAM_ID в .env"
             )
-        metadata = {}
-        if job.thread_id is not None:
-            metadata["message_thread_id"] = job.thread_id
+        metadata = proactive_meta(
+            agent_name,
+            {"message_thread_id": job.thread_id},
+        )
         notification = FleetMessage(
             source=f"agent:{agent_name}",
             target=f"telegram:{target_agent}",

@@ -42,6 +42,7 @@ from .task_utils import spawn_supervised
 from . import llm, memory
 from .bus import FleetBus, FleetMessage, MessageType
 from .cron import should_run
+from .fleet_control import proactive_meta
 from .heartbeat import check_heartbeat
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,7 @@ class SmartHeartbeat:
                     content=f"[Heartbeat] {result['notification']}",
                     msg_type=MessageType.OUTBOUND,
                     chat_id=self.chat_id,
+                    metadata=proactive_meta(self.agent_name),
                 )
                 await self.bus.publish(msg)
                 logger.info(
@@ -220,7 +222,11 @@ class SmartHeartbeat:
             elif trigger.notify is False or trigger.notify == "false":
                 should_notify = False
             elif trigger.notify == "auto":
-                should_notify = await self._evaluate_notification(response)
+                stripped = (response or "").strip()
+                if "NO_ISSUES" in stripped.upper() and len(stripped) < 80:
+                    should_notify = False
+                else:
+                    should_notify = await self._evaluate_notification(response)
 
             # 5. Отправить уведомление
             if should_notify and self.bus:
@@ -283,9 +289,10 @@ class SmartHeartbeat:
         target_chat_id = (
             trigger.chat_id if trigger.chat_id is not None else self.chat_id
         )
-        metadata = {}
-        if trigger.thread_id is not None:
-            metadata["message_thread_id"] = trigger.thread_id
+        metadata = proactive_meta(
+            self.agent_name,
+            {"message_thread_id": trigger.thread_id},
+        )
 
         msg = FleetMessage(
             source=f"agent:{self.agent_name}",
@@ -304,7 +311,9 @@ class SmartHeartbeat:
     # Sentinel-ответы триггеров, которые не несут содержания и не должны
     # попадать в daily-лог (иначе knowledge graph extractor превращает их
     # в фальшивые сущности типа "SmartTrigger" / "deadline_check").
-    _NOISE_RESPONSES = {"NO_DEADLINES", "NONE", "NOTHING", "EMPTY", "OK"}
+    _NOISE_RESPONSES = {
+        "NO_DEADLINES", "NO_ISSUES", "NONE", "NOTHING", "EMPTY", "OK",
+    }
 
     @classmethod
     def _is_noise_response(cls, response: str) -> bool:

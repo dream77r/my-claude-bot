@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 
 from .bus import FleetBus, FleetMessage, MessageType
+from .fleet_control import proactive_meta
 from .fs_watcher import DirectoryWatcher
 
 logger = logging.getLogger(__name__)
@@ -140,11 +141,14 @@ async def _publish_one(
         _quarantine(path, str(path.parent.parent.parent))
         return False
 
-    metadata = {
-        "message_thread_id": payload.get("message_thread_id"),
-        "source": payload.get("source", "dispatch"),
-        "parse_mode": payload.get("parse_mode"),
-    }
+    metadata = proactive_meta(
+        agent_name,
+        {
+            "message_thread_id": payload.get("message_thread_id"),
+            "source": payload.get("source", "dispatch"),
+            "parse_mode": payload.get("parse_mode"),
+        },
+    )
     if "reminder_id" in payload:
         metadata["reminder_id"] = payload["reminder_id"]
 
