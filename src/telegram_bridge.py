@@ -444,6 +444,11 @@ class TelegramBridge(
         # Multi-user access key commands
         router.exact("/newkey", self._cmd_newkey)
 
+        if self.agent.name == "iiko_invoice" and os.getenv("IIKO_BB_ENABLED") == "1":
+            from functools import partial
+            from .iiko_grant_limit import handle_limit
+            router.exact("/iiko_limit", partial(handle_limit, self))
+
         # GitHub Backup commands
         router.exact("/backup_link", self._cmd_backup_link)
         router.exact("/backup_now", self._cmd_backup_now)
